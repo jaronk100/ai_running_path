@@ -1,0 +1,60 @@
+# GraphHopper config for RunPath.
+#
+# NOTE: after editing graph.encoded_values or swapping the .pbf you MUST delete
+# routing/graph-cache/ and restart, or GraphHopper will reuse the stale graph.
+graphhopper:
+  datareader.file: "data/region.osm.pbf"
+  graph.location: graph-cache
+
+  # Everything the scoring layer reads back via `details=`, plus what the custom
+  # model needs at query time. osm_way_id is what lets enrich.ts join each
+  # segment back to raw OSM tags for sidewalk=* (see docs/sidewalk-gap.md).
+  graph.encoded_values: >
+    foot_access, foot_average_speed, foot_priority,
+    road_class, road_class_link, road_environment, road_access,
+    max_speed, surface, smoothness, lit, average_slope, hike_rating,
+    osm_way_id
+
+  # Freeways are dropped at import time as well as in the custom model. Belt and
+  # suspenders: the hard requirement is "no interstates or freeways, ever".
+  # Links stay importable so a route may still cross one at a signalised
+  # crossing, which is the single allowed exception.
+  import.osm.ignored_highways: motorway,trunk
+
+  profiles:
+    - name: running
+      weighting: custom
+      turn_costs:
+        enabled: false
+      custom_model_files: [running.json]
+
+  # Elevation drives the average_slope encoded value and the reported gain.
+  # SRTM tiles are cached on disk after first download.
+  graph.elevation.provider: srtm
+  graph.elevation.cache_dir: ./data/srtm-cache
+  graph.elevation.dataaccess: MMAP
+
+  # No CH: algorithm=round_trip requires flexible mode.
+  profiles_ch: []
+  profiles_lm: []
+
+  custom_models.directory: custom_models
+
+server:
+  application_connectors:
+    - type: http
+      port: 8989
+      bind_host: 0.0.0.0
+  admin_connectors:
+    - type: http
+      port: 8990
+      bind_host: 0.0.0.0
+
+logging:
+  appenders:
+    - type: console
+      time_zone: UTC
+      log_format: "%d{HH:mm:ss} %-5p %c{1} - %m%n"
+  level: INFO
+  loggers:
+    com.graphhopper: INFO

@@ -1,0 +1,103 @@
+# Setup
+
+## What your machine is missing
+
+Checked on this box: Node 24 and git are present. **Java and Docker are not.**
+GraphHopper needs one of them. Pick either.
+
+- **JDK 17+** — lighter, and the path GraphHopper documents best. Good for dev.
+- **Docker Desktop** — heavier install, but it is what you will deploy with, so
+  installing it now means dev and prod run the same thing.
+
+## 1. Get the Austin map data
+
+Two options. Start with the small one.
+
+**BBBike custom extract (recommended for dev, ~50-100 MB).**
+Go to <https://extract.bbbike.org/>, draw a box around the Austin metro, choose
+format `Protocolbuffer (PBF)`, and enter your email. You get a download link in a
+few minutes. Save it as:
+
+    routing/data/region.osm.pbf
+
+**Geofabrik Texas (full state, ~1.5 GB, slow first import).**
+
+```bash
+curl -L -o routing/data/region.osm.pbf https://download.geofabrik.de/north-america/us/texas-latest.osm.pbf
+```
+
+The state file is what you want once friends and family outside Austin start
+testing. Everything in `routing/config.yml` is identical either way — only the
+import time and the RAM ceiling change.
+
+## 2. Run GraphHopper
+
+### Option A — JAR
+
+Download the `graphhopper-web` shaded JAR from the
+[releases page](https://github.com/graphhopper/graphhopper/releases), drop it in
+`routing/`, then:
+
+```bash
+cd routing && java -Xmx4g -jar graphhopper-web-*.jar server config.yml
+```
+
+### Option B — Docker
+
+```bash
+docker compose up graphhopper
+```
+
+Either way the **first** boot imports the extract and builds the graph. That is
+minutes for Austin, considerably longer for all of Texas. Later boots reuse
+`routing/graph-cache/` and start in seconds.
+
+> Delete `routing/graph-cache/` whenever you change `graph.encoded_values` or
+> swap the `.pbf`. GraphHopper will otherwise silently reuse the stale graph and
+> you will spend an hour wondering why your config change did nothing.
+
+Confirm it is alive:
+
+```bash
+curl http://localhost:8989/health
+```
+
+## 3. Run the API
+
+```bash
+cd api && npm install && npm run dev
+```
+
+```bash
+curl -s -X POST http://localhost:8080/search -H "content-type: application/json" -d "{\"address\":\"1100 Congress Ave, Austin, TX 78701\",\"distanceMi\":2.0,\"pathType\":\"loop\",\"maxApproachMi\":0.4}"
+```
+
+## 4. Tests
+
+```bash
+cd api && npm test
+```
+
+Ten tests cover the scoring function: approach dominance, the sidewalk
+preference ordering, freeway disqualification, elevation neutrality, and the
+`2A + (N x L)` distance math. They run without GraphHopper.
+
+## Known limits, honestly
+
+- **Sidewalk data is partial.** Austin OSM coverage is decent but nowhere near
+  complete. Unknown coverage is scored neutrally and never excludes a route, and
+  `/search` returns a `notes` array saying when data was missing. Do not let the
+  UI render "no sidewalk data" as "no sidewalk".
+- **`round_trip` is approximate.** It regularly misses the requested length by a
+  few percent, which is why `candidates.ts` requests three nudged distances and
+  gates hard at +/- 0.1 mi afterwards. If too few results come back, raise
+  `seedsPerStart` before loosening the tolerance.
+- **Overpass is rate-limited.** The public endpoint will not survive real
+  traffic. Stand up a private instance, or pre-extract sidewalk tags from the
+  `.pbf` you already downloaded, before launch.
+- **The Google Maps link is approximate by construction.** Google's URL scheme
+  caps at 9 waypoints, so it re-routes between a skeleton of your route. GPX is
+  the faithful export. The API returns both; label them differently in the UI.
+- **Crossing counts are a heuristic.** GraphHopper does not surface OSM crossing
+  nodes, so `crossingsOfMajorRoads` infers them from short runs on busy classes.
+  Good enough to tell "crosses Lamar twice" from "runs up Lamar", not a survey.

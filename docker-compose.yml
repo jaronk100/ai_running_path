@@ -1,0 +1,36 @@
+# Convenience path. The JAR path in docs/setup.md is the one to fall back on if
+# the image tag drifts -- verify the tag against Docker Hub before relying on it.
+services:
+  graphhopper:
+    image: graphhopper/graphhopper:latest
+    container_name: runpath-graphhopper
+    ports:
+      - "8989:8989"
+    volumes:
+      - ./routing/data:/data
+      - ./routing/config.yml:/graphhopper/config.yml:ro
+      - ./routing/custom_models:/graphhopper/custom_models:ro
+      - ./routing/graph-cache:/graphhopper/graph-cache
+    command: >
+      --input /data/region.osm.pbf
+      --config /graphhopper/config.yml
+    # First boot imports the extract and is slow (minutes). Later boots reuse
+    # graph-cache and start in seconds.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8989/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 300s
+
+  api:
+    build: ./api
+    container_name: runpath-api
+    ports:
+      - "8080:8080"
+    environment:
+      GRAPHHOPPER_URL: http://graphhopper:8989
+      PORT: "8080"
+    depends_on:
+      graphhopper:
+        condition: service_healthy

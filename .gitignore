@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.env
+.env.local
+*.log
+
+# OSM data + built graph caches — large, regenerable
+routing/data/*.pbf
+routing/data/*.osm
+routing/graph-cache/
+routing/*.json.gz
+
+# Expo
+app/.expo/
+app/node_modules/
