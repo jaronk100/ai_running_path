@@ -63,8 +63,16 @@ async function findLoops(
   home: LatLng,
   req: SearchRequest,
 ): Promise<RouteCandidate[]> {
-  const maxApproachMi = req.maxApproachMi ?? 0.5;
+  const maxApproachMi = Math.min(
+    req.maxApproachMi ?? 0.5,
+    config.search.maxApproachCapMi,
+  );
   const starts = await buildStartPoints(home, maxApproachMi);
+
+  // Closest starts first, so trimming to the job budget below discards the
+  // furthest ones — the same candidates the approach term would have ranked
+  // last. Cheaper and better-aligned than sampling uniformly and truncating.
+  starts.sort((a, b) => a.approachMi - b.approachMi);
 
   const jobs: { start: StartPoint; seed: number; nudge: number }[] = [];
   for (const start of starts) {
@@ -74,8 +82,9 @@ async function findLoops(
       }
     }
   }
+  const budgeted = jobs.slice(0, config.search.maxRoundTripJobs);
 
-  const paths = await pMap(jobs, GH_CONCURRENCY, async (job) => {
+  const paths = await pMap(budgeted, GH_CONCURRENCY, async (job) => {
     const path = await gh.roundTrip(
       job.start.point,
       req.distanceMi * job.nudge * MI_TO_M,
@@ -121,9 +130,11 @@ async function buildStartPoints(
 
   const samples: LatLng[] = [];
   const bearings = config.search.approachSamples;
-  // Two rings: crow-flies always under-estimates walking distance, so sampling
-  // at 55% and 85% of the cap keeps most candidates inside it after routing.
-  for (const ratio of [0.55, 0.85]) {
+  // Rings are biased toward home rather than spread evenly. Scoring punishes
+  // approach distance steeply, so an even spread would spend most of its
+  // samples on starts that can never win — at a 5 mi cap, even spacing would
+  // leave nothing at all between the door and 2.75 mi out.
+  for (const ratio of [0.25, 0.5, 0.8]) {
     for (let i = 0; i < bearings; i++) {
       samples.push(
         destinationPoint(

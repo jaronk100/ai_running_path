@@ -21,10 +21,19 @@ export const config = {
   search: {
     /** Hard gate from the spec: a route is only a match within this band. */
     distanceToleranceMi: 0.1,
+    /** Furthest a loop start may sit from home. Most runners want far less. */
+    maxApproachCapMi: 5,
     /** Candidate loop start points sampled around the home point. */
     approachSamples: 12,
     /** round_trip seeds tried per start point. */
     seedsPerStart: 4,
+    /**
+     * Ceiling on round_trip calls per search. Without this, a 5-mile approach
+     * cap would fan out to ~300 calls. Jobs are taken closest-start-first, so
+     * trimming to the budget drops the furthest starts — which is exactly what
+     * the scorer would have ranked lowest anyway.
+     */
+    maxRoundTripJobs: 120,
     /** Two candidates sharing more than this fraction of geometry are dupes. */
     maxGeometryOverlap: 0.6,
     resultsPerPage: 5,

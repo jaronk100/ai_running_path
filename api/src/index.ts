@@ -13,9 +13,12 @@ const searchSchema = z.object({
   address: z.string().min(3).max(300),
   distanceMi: z.number().positive().max(100),
   pathType: z.enum(["loop", "out_and_back"]),
-  // Ignored for out_and_back, which always starts at the door. Uncapped by
-  // design — the spec says do not put a limit on it for now.
-  maxApproachMi: z.number().min(0).max(25).optional(),
+  // Ignored for out_and_back, which always starts at the door.
+  maxApproachMi: z
+    .number()
+    .min(0)
+    .max(config.search.maxApproachCapMi)
+    .optional(),
   page: z.number().int().min(1).max(20).optional(),
 });
 
