@@ -15,6 +15,7 @@ function seg(over: Partial<SegmentInfo> = {}): SegmentInfo {
     surface: "asphalt",
     sidewalk: "unknown",
     isDedicatedFootway: false,
+    isCrossing: false,
     ...over,
   };
 }
@@ -35,6 +36,7 @@ function metrics(over: Partial<RouteMetrics> = {}): RouteMetrics {
     highSpeedPct: 0,
     busyRoadPct: 0,
     crossingsOfMajorRoads: 0,
+    totalCrossings: 0,
     ...over,
   };
 }

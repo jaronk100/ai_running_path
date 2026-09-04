@@ -9,10 +9,17 @@ graphhopper:
   # Everything the scoring layer reads back via `details=`, plus what the custom
   # model needs at query time. osm_way_id is what lets enrich.ts join each
   # segment back to raw OSM tags for sidewalk=* (see docs/sidewalk-gap.md).
+  # NOTE: there is no `lit` encoded value in GraphHopper 11 despite what some
+  # docs claim -- verified against the class list in the shipped jar. Streetlight
+  # coverage is therefore sourced from Overpass alongside sidewalk=*.
+  #
+  # `footway` separates footway=sidewalk from footway=crossing, and `crossing`
+  # carries real OSM crossing data, so both feed scoring directly.
   graph.encoded_values: >
     foot_access, foot_average_speed, foot_priority,
     road_class, road_class_link, road_environment, road_access,
-    max_speed, surface, smoothness, lit, average_slope, hike_rating,
+    max_speed, surface, smoothness, average_slope, hike_rating,
+    footway, crossing, lanes,
     osm_way_id
 
   # Freeways are dropped at import time as well as in the custom model. Belt and
@@ -22,10 +29,10 @@ graphhopper:
   import.osm.ignored_highways: motorway,trunk
 
   profiles:
+    # Turn costs are off unless a turn_costs block is present, which is what we
+    # want: a runner can turn around anywhere.
     - name: running
       weighting: custom
-      turn_costs:
-        enabled: false
       custom_model_files: [running.json]
 
   # Elevation drives the average_slope encoded value and the reported gain.

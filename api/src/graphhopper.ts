@@ -5,7 +5,8 @@ const DETAILS = [
   "road_class",
   "surface",
   "max_speed",
-  "lit",
+  "footway",
+  "crossing",
   "average_slope",
   "osm_way_id",
 ];
@@ -46,32 +47,9 @@ const baseBody = {
   "ch.disable": true,
 };
 
-/**
- * One approximate loop of `distanceMeters` starting and ending at `start`.
- * `seed` is the only lever for variety — same seed always yields the same loop,
- * so callers sweep it to build a candidate set.
- */
-export async function roundTrip(
-  start: LatLng,
-  distanceMeters: number,
-  seed: number,
-): Promise<GHPath | null> {
-  try {
-    const { paths } = await post({
-      ...baseBody,
-      points: [[start.lon, start.lat]],
-      algorithm: "round_trip",
-      "round_trip.distance": Math.round(distanceMeters),
-      "round_trip.seed": seed,
-    });
-    return paths[0] ?? null;
-  } catch (err) {
-    // A seed that lands in a dead end is normal, not exceptional. Only a
-    // transport-level failure should stop the whole search.
-    if (err instanceof GraphHopperError && err.status < 500) return null;
-    throw err;
-  }
-}
+// NOTE: GraphHopper's algorithm=round_trip was removed deliberately. Measured
+// against the Austin extract it returned 0.70x-8.59x the requested distance and
+// hit the +/-0.1 mi gate once in 48 tries. See loops.ts for what replaced it.
 
 /** Plain point-to-point route. Used for the approach leg and out-and-back legs. */
 export async function route(points: LatLng[]): Promise<GHPath | null> {

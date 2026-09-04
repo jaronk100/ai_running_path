@@ -13,3 +13,13 @@ routing/*.json.gz
 # Expo
 app/.expo/
 app/node_modules/
+
+# Runtime artifacts
+api/api.log
+api/*.json
+!api/package.json
+!api/package-lock.json
+!api/tsconfig.json
+routing/gh-boot.log
+routing/*.jar
+routing/data/srtm-cache/

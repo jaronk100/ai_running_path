@@ -25,15 +25,13 @@ export const config = {
     maxApproachCapMi: 5,
     /** Candidate loop start points sampled around the home point. */
     approachSamples: 12,
-    /** round_trip seeds tried per start point. */
-    seedsPerStart: 4,
     /**
-     * Ceiling on round_trip calls per search. Without this, a 5-mile approach
-     * cap would fan out to ~300 calls. Jobs are taken closest-start-first, so
-     * trimming to the budget drops the furthest starts — which is exactly what
-     * the scorer would have ranked lowest anyway.
+     * Ceiling on loop-generation attempts per search. Each attempt is a
+     * bisection costing up to 9 GraphHopper calls and converges ~37% of the
+     * time, so ~48 attempts yields roughly 15 usable loops. Taken
+     * closest-start-first, so trimming drops what the scorer ranks lowest.
      */
-    maxRoundTripJobs: 120,
+    maxLoopAttempts: 48,
     /** Two candidates sharing more than this fraction of geometry are dupes. */
     maxGeometryOverlap: 0.6,
     resultsPerPage: 5,

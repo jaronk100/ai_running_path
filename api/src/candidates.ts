@@ -1,22 +1,24 @@
 import { createHash } from "node:crypto";
 import { config } from "./config.js";
-import { enrichPath, type EnrichedPath } from "./enrich.js";
+import { enrichPath, wayIdsOf, type EnrichedPath } from "./enrich.js";
 import { MI_TO_M, destinationPoint, geometryOverlap } from "./geo.js";
 import * as gh from "./graphhopper.js";
+import { generateLoop, loopVariants } from "./loops.js";
 import { geocode } from "./geocode.js";
 import { pMap } from "./pmap.js";
 import { isDisqualified, scoreRoute } from "./scoring.js";
+import { lookupWayTags } from "./sidewalks.js";
 import type { LatLng, RouteCandidate, SearchRequest } from "./types.js";
 
 const GH_CONCURRENCY = 6;
+const ENRICH_CONCURRENCY = 8;
 
-/**
- * round_trip only promises an "approximative" length, and in practice it
- * regularly lands several percent off. Asking for the target plus a low and a
- * high nudge widens the net so enough candidates survive the strict +/- 0.1 mi
- * gate. Cheap insurance: three requests where one would under-deliver.
- */
-const DISTANCE_NUDGES = [1.0, 0.93, 1.07];
+/** Collect way ids across many paths and warm the tag cache in one request. */
+async function prefetchTags(paths: { details?: unknown }[]): Promise<void> {
+  const ids = new Set<number>();
+  for (const p of paths) for (const id of wayIdsOf(p as never)) ids.add(id);
+  if (ids.size > 0) await lookupWayTags(ids);
+}
 
 export interface SearchResult {
   home: LatLng;
@@ -74,39 +76,44 @@ async function findLoops(
   // last. Cheaper and better-aligned than sampling uniformly and truncating.
   starts.sort((a, b) => a.approachMi - b.approachMi);
 
-  const jobs: { start: StartPoint; seed: number; nudge: number }[] = [];
+  const variants = loopVariants();
+  const jobs: { start: StartPoint; bearing: number; sides: number }[] = [];
   for (const start of starts) {
-    for (let seed = 0; seed < config.search.seedsPerStart; seed++) {
-      for (const nudge of DISTANCE_NUDGES) {
-        jobs.push({ start, seed, nudge });
-      }
-    }
+    for (const v of variants) jobs.push({ start, bearing: v.bearing, sides: v.sides });
   }
-  const budgeted = jobs.slice(0, config.search.maxRoundTripJobs);
+  const budgeted = jobs.slice(0, config.search.maxLoopAttempts);
 
   const paths = await pMap(budgeted, GH_CONCURRENCY, async (job) => {
-    const path = await gh.roundTrip(
+    const attempt = await generateLoop(
       job.start.point,
-      req.distanceMi * job.nudge * MI_TO_M,
-      job.seed,
+      req.distanceMi * MI_TO_M,
+      job.bearing,
+      job.sides,
     );
-    return path ? { job, path } : null;
+    return attempt ? { job, path: attempt.path } : null;
+  });
+
+  const hits = paths.filter((r) => r !== null);
+
+  // One Overpass query for every surviving route, rather than one per route.
+  // enrichPath then reads straight from cache instead of going out to network.
+  await prefetchTags(hits.map((r) => r.path));
+
+  const enrichedAll = await pMap(hits, ENRICH_CONCURRENCY, async (r) => {
+    // generateLoop already enforces the tolerance gate before returning.
+    const enriched = await enrichPath(r.path);
+    return isDisqualified(enriched) ? null : { enriched, job: r.job };
   });
 
   const out: RouteCandidate[] = [];
-  for (const r of paths) {
-    if (!r) continue;
-    if (!withinTolerance(r.path.distance, req.distanceMi)) continue;
-
-    const enriched = await enrichPath(r.path);
-    if (isDisqualified(enriched)) continue;
-
+  for (const e of enrichedAll) {
+    if (!e) continue;
     out.push(
       toCandidate(
-        enriched,
+        e.enriched,
         "loop",
-        r.job.start.approachMi,
-        r.job.start.approachCoordinates,
+        e.job.start.approachMi,
+        e.job.start.approachCoordinates,
       ),
     );
   }

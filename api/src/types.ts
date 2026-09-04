@@ -27,7 +27,8 @@ export interface GHPath {
     road_class?: DetailInterval<string>[];
     surface?: DetailInterval<string>[];
     max_speed?: DetailInterval<number | null>[];
-    lit?: DetailInterval<boolean | null>[];
+    footway?: DetailInterval<string>[];
+    crossing?: DetailInterval<string>[];
     average_slope?: DetailInterval<number | null>[];
     osm_way_id?: DetailInterval<number>[];
   };
@@ -62,7 +63,10 @@ export interface RouteMetrics {
   /** Share on primary/secondary. */
   busyRoadPct: number;
 
+  /** Crossings of primary/secondary/tertiary roads. Drives the safety penalty. */
   crossingsOfMajorRoads: number;
+  /** Every pedestrian crossing including quiet corners. Informational only. */
+  totalCrossings: number;
 }
 
 export interface RouteCandidate {
