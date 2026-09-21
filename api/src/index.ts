@@ -1,13 +1,22 @@
+import { fileURLToPath } from "node:url";
 import express from "express";
 import { z } from "zod";
 import { findRoutes } from "./candidates.js";
 import { config } from "./config.js";
 import { googleMapsUrl, toGpx, totalRunMiles } from "./export.js";
 import * as gh from "./graphhopper.js";
-import { cachedCount } from "./sidewalks.js";
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
+
+// Dev route viewer at /viewer: draws /search results on a map so candidate
+// shapes can be judged by eye, which no metric replaces. Resolves the same way
+// under tsx (src/) and the compiled build (dist/).
+app.use(
+  express.static(fileURLToPath(new URL("../public", import.meta.url)), {
+    extensions: ["html"],
+  }),
+);
 
 const searchSchema = z.object({
   address: z.string().min(3).max(300),
@@ -27,7 +36,6 @@ app.get("/health", async (_req, res) => {
   res.status(routingUp ? 200 : 503).json({
     ok: routingUp,
     graphhopper: routingUp ? "up" : "unreachable",
-    sidewalkCacheEntries: cachedCount(),
   });
 });
 
@@ -51,11 +59,6 @@ app.post("/search", async (req, res) => {
           totalRunMiles(c.approachDistanceMi, c.loopDistanceMi, 1).toFixed(2),
         ),
       })),
-      // Surfaced so the UI can say "no sidewalk data for this area" rather than
-      // silently implying these routes have no sidewalks.
-      notes: result.sidewalkDataComplete
-        ? []
-        : ["Sidewalk data was unavailable for some segments; those are scored neutrally."],
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown error";

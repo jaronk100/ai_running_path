@@ -5,15 +5,6 @@ export const config = {
   graphhopperUrl: process.env.GRAPHHOPPER_URL ?? "http://localhost:8989",
   profile: "running",
 
-  /**
-   * Overpass supplies the OSM sidewalk=* tags that GraphHopper cannot expose as
-   * an encoded value. Enrichment degrades gracefully if this is unreachable —
-   * see enrich.ts. Swap for a private instance before public launch; the public
-   * endpoint is rate-limited and will not survive real traffic.
-   */
-  overpassUrl: process.env.OVERPASS_URL ?? "https://overpass-api.de/api/interpreter",
-  overpassTimeoutMs: 12_000,
-
   /** US Census geocoder: free, no key, US-only, good on street addresses. */
   censusGeocodeUrl:
     "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress",
@@ -25,13 +16,18 @@ export const config = {
     maxApproachCapMi: 5,
     /** Candidate loop start points sampled around the home point. */
     approachSamples: 12,
+    /** round_trip seeds tried per loop start point. Seed is the only source of
+     *  shape variety, so this sets how many distinct loops each start offers. */
+    seedsPerStart: 20,
     /**
-     * Ceiling on loop-generation attempts per search. Each attempt is a
-     * bisection costing up to 9 GraphHopper calls and converges ~37% of the
-     * time, so ~48 attempts yields roughly 15 usable loops. Taken
-     * closest-start-first, so trimming drops what the scorer ranks lowest.
+     * Ceiling on seed searches per request. Each costs up to 6 GraphHopper
+     * calls at ~7 ms, and about 1 in 5 lands a loop inside the tolerance.
+     * Taken closest-start-first, so trimming drops what the scorer ranks lowest.
      */
-    maxLoopAttempts: 48,
+    maxLoopSeeds: 160,
+    /** A "loop" with more than this share of streets run twice is really an
+     *  out-and-back, and is dropped from loop results. */
+    maxLoopRetrace: 0.5,
     /** Two candidates sharing more than this fraction of geometry are dupes. */
     maxGeometryOverlap: 0.6,
     resultsPerPage: 5,

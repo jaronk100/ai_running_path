@@ -29,8 +29,6 @@ export interface GHPath {
     max_speed?: DetailInterval<number | null>[];
     footway?: DetailInterval<string>[];
     crossing?: DetailInterval<string>[];
-    average_slope?: DetailInterval<number | null>[];
-    osm_way_id?: DetailInterval<number>[];
   };
 }
 
@@ -44,26 +42,17 @@ export interface RouteMetrics {
   roadClassMix: Record<string, number>;
   surfaceMix: Record<string, number>;
 
-  /** Dedicated footway/path/pedestrian — a sidewalk drawn as its own way. */
-  dedicatedFootwayPct: number;
-  /** Roadway carrying sidewalk=both|left|right in OSM. */
-  taggedSidewalkPct: number;
-  /** Roadway explicitly tagged sidewalk=no. */
-  noSidewalkPct: number;
-  /** Roadway with no sidewalk information at all. Not a failure — Austin OSM
-   *  coverage is partial, and the spec says never to exclude on this. */
-  unknownSidewalkPct: number;
-
-  /** Share with lit=yes. Reported, never used to exclude. */
-  litPct: number;
-  litKnownPct: number;
-
-  /** Share on roads posted above 35 mph — the real safety signal. */
+  /** Share of length on streets the route runs more than once. 0 = true loop,
+   *  1 = pure out-and-back. The stem out of a cul-de-sac is the usual cause. */
+  retracePct: number;
+  /** Share on car-free ways: footpaths, trails, separately-drawn walkways. */
+  pathPct: number;
+  /** Share on roads posted above 35 mph. */
   highSpeedPct: number;
   /** Share on primary/secondary. */
   busyRoadPct: number;
 
-  /** Crossings of primary/secondary/tertiary roads. Drives the safety penalty. */
+  /** Crossings of primary/secondary/tertiary roads. Penalised in scoring. */
   crossingsOfMajorRoads: number;
   /** Every pedestrian crossing including quiet corners. Informational only. */
   totalCrossings: number;
@@ -81,6 +70,4 @@ export interface RouteCandidate {
   metrics: RouteMetrics;
   score: number;
   scoreBreakdown: Record<string, number>;
-  /** Populated only when enrichment could reach Overpass. */
-  sidewalkDataAvailable: boolean;
 }

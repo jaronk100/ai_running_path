@@ -6,15 +6,16 @@ graphhopper:
   datareader.file: "data/region.osm.pbf"
   graph.location: graph-cache
 
-  # Everything the scoring layer reads back via `details=`, plus what the custom
-  # model needs at query time. osm_way_id is what lets enrich.ts join each
-  # segment back to raw OSM tags for sidewalk=* (see docs/sidewalk-gap.md).
-  # NOTE: there is no `lit` encoded value in GraphHopper 11 despite what some
-  # docs claim -- verified against the class list in the shipped jar. Streetlight
-  # coverage is therefore sourced from Overpass alongside sidewalk=*.
+  # Everything api/src/enrich.ts reads back via `details=`, plus what the custom
+  # model needs at query time. `footway` separates footway=sidewalk from
+  # footway=crossing; `crossing` carries OSM crossing types, whose
+  # traffic_signals value is how busy-road crossings are detected.
   #
-  # `footway` separates footway=sidewalk from footway=crossing, and `crossing`
-  # carries real OSM crossing data, so both feed scoring directly.
+  # There is no `lit` encoded value in GraphHopper 11, despite some docs --
+  # verified against the class list in the shipped jar.
+  #
+  # osm_way_id and lanes are currently unused. They are kept because removing
+  # an encoded value forces a full graph rebuild, and both are cheap.
   graph.encoded_values: >
     foot_access, foot_average_speed, foot_priority,
     road_class, road_class_link, road_environment, road_access,

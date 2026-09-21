@@ -1,14 +1,19 @@
-import { M_TO_FT, M_TO_MI, segmentLengths } from "./geo.js";
-import { lookupWayTags, type SidewalkSide } from "./sidewalks.js";
+import { M_TO_FT, M_TO_MI, retraceShare, segmentLengths } from "./geo.js";
 import type { DetailInterval, GHPath, RouteMetrics } from "./types.js";
 
 /** GraphHopper reports max_speed in km/h. Everything downstream is mph. */
 const KMH_TO_MPH = 0.621371;
 
-/** A sidewalk drawn as its own OSM way arrives as one of these road classes. */
-const DEDICATED_FOOTWAY = new Set(["footway", "pedestrian", "path", "steps"]);
-/** Unpaved-but-pleasant. The spec explicitly allows dirt and gravel. */
-const TRAIL_LIKE = new Set(["track", "bridleway"]);
+/** Car-free ways. The spec explicitly allows dirt and gravel, so trails count. */
+const PATH_CLASSES = new Set([
+  "footway",
+  "pedestrian",
+  "path",
+  "steps",
+  "track",
+  "bridleway",
+  "cycleway",
+]);
 const BUSY = new Set(["primary", "secondary", "primary_link", "secondary_link"]);
 
 /** crossing=* values that mean this segment is a real pedestrian crossing. */
@@ -26,8 +31,8 @@ const HIGH_SPEED_MPH = 35;
 /**
  * Roads worth counting a crossing of. The `crossing` encoded value marks every
  * crossing way including quiet residential corners -- a 2 mi suburb loop scores
- * 17 of those, which maxes the safety penalty for every candidate and therefore
- * discriminates nothing. Crossings that matter are inferred separately, from
+ * 17 of those, which would max the penalty for every candidate and therefore
+ * discriminate nothing. Crossings that matter are inferred separately, from
  * short hops onto busy classes.
  */
 const CROSSABLE_BUT_NOT_RUNNABLE = new Set([
@@ -42,30 +47,32 @@ const CROSSABLE_BUT_NOT_RUNNABLE = new Set([
 /** A short hop onto a busy road is a crossing; a long one is running along it. */
 const CROSSING_MAX_M = 40;
 
-function countMajorRoadCrossings(segments: SegmentInfo[]): number {
-  let crossings = 0;
-  let runM = 0;
-  let inRun = false;
+/**
+ * Signals closer together than this along the route are one crossing. A
+ * divided road puts a signal node on each carriageway, and one intersection
+ * should not count twice.
+ */
+const SIGNAL_CLUSTER_M = 60;
 
-  for (const s of segments) {
-    if (CROSSABLE_BUT_NOT_RUNNABLE.has(s.roadClass)) {
-      runM += s.lengthM;
-      inRun = true;
-    } else if (inRun) {
-      if (runM <= CROSSING_MAX_M) crossings++;
-      runM = 0;
-      inRun = false;
-    }
-  }
-  if (inRun && runM <= CROSSING_MAX_M) crossings++;
-  return crossings;
+export interface EnrichedPath {
+  coordinates: [number, number][];
+  distanceMi: number;
+  metrics: RouteMetrics;
+  /** Per-segment classification, kept for the scorer. */
+  segments: SegmentInfo[];
 }
 
-/** Way ids on a path, so callers can prefetch tags for many paths in one query. */
-export function wayIdsOf(path: GHPath): number[] {
-  const ids = new Set<number>();
-  for (const [, , id] of path.details?.osm_way_id ?? []) ids.add(id);
-  return [...ids];
+export interface SegmentInfo {
+  lengthM: number;
+  roadClass: string;
+  /** Converted to mph on the way in. */
+  maxSpeed: number | null;
+  surface: string | null;
+  /** Car-free: no traffic to weigh, whatever the adjacent road is doing. */
+  isPath: boolean;
+  isCrossing: boolean;
+  /** Raw OSM crossing=* value, e.g. traffic_signals, marked, missing. */
+  crossing: string;
 }
 
 /**
@@ -91,28 +98,54 @@ function addTo(mix: Record<string, number>, key: string, weight: number): void {
   mix[key] = (mix[key] ?? 0) + weight;
 }
 
-export interface EnrichedPath {
-  coordinates: [number, number][];
-  distanceMi: number;
-  metrics: RouteMetrics;
-  sidewalkDataAvailable: boolean;
-  /** Per-segment classification, kept for the scorer's nuanced rules. */
-  segments: SegmentInfo[];
+/**
+ * Two ways a route crosses a busy road, and each counter catches one:
+ *
+ * - At a signalised intersection. The route stays on the road it is running
+ *   along and passes over the busy road at a single node, so the busy road never
+ *   appears in road_class at all -- only crossing=traffic_signals does. Verified
+ *   on the Whitestone Blvd (RM 1431) crossing north of the Cedar Park library,
+ *   which the hop counter alone scored as zero.
+ * - Where no signal is mapped, as a short hop onto a busy road class.
+ */
+function countMajorRoadCrossings(segments: SegmentInfo[]): number {
+  return countSignalCrossings(segments) + countShortHopCrossings(segments);
 }
 
-export interface SegmentInfo {
-  lengthM: number;
-  roadClass: string;
-  /** Converted to mph on the way in. */
-  maxSpeed: number | null;
-  lit: boolean | null;
-  surface: string | null;
-  sidewalk: SidewalkSide;
-  isDedicatedFootway: boolean;
-  isCrossing: boolean;
+function countSignalCrossings(segments: SegmentInfo[]): number {
+  let count = 0;
+  let travelled = 0;
+  let lastSignalAt = -Infinity;
+  for (const s of segments) {
+    if (s.crossing === "traffic_signals") {
+      if (travelled - lastSignalAt > SIGNAL_CLUSTER_M) count++;
+      lastSignalAt = travelled;
+    }
+    travelled += s.lengthM;
+  }
+  return count;
 }
 
-export async function enrichPath(path: GHPath): Promise<EnrichedPath> {
+function countShortHopCrossings(segments: SegmentInfo[]): number {
+  let crossings = 0;
+  let runM = 0;
+  let inRun = false;
+
+  for (const s of segments) {
+    if (CROSSABLE_BUT_NOT_RUNNABLE.has(s.roadClass)) {
+      runM += s.lengthM;
+      inRun = true;
+    } else if (inRun) {
+      if (runM <= CROSSING_MAX_M) crossings++;
+      runM = 0;
+      inRun = false;
+    }
+  }
+  if (inRun && runM <= CROSSING_MAX_M) crossings++;
+  return crossings;
+}
+
+export function enrichPath(path: GHPath): EnrichedPath {
   const coordinates = path.points.coordinates.map(
     ([lon, lat]) => [lon, lat] as [number, number],
   );
@@ -125,30 +158,12 @@ export async function enrichPath(path: GHPath): Promise<EnrichedPath> {
   const speeds = perSegment(path.details?.max_speed, segCount);
   const footways = perSegment(path.details?.footway, segCount);
   const crossings = perSegment(path.details?.crossing, segCount);
-  const wayIds = perSegment(path.details?.osm_way_id, segCount);
-
-  // Only roadways need a tag lookup. footway == SIDEWALK already answers the
-  // sidewalk question natively, so keep the Overpass query as small as possible
-  // -- though lit is still unknown for those, hence the separate condition.
-  const needTags = new Set<number>();
-  for (let i = 0; i < segCount; i++) {
-    const id = wayIds[i];
-    if (id === undefined) continue;
-    const fw = (footways[i] ?? "missing").toLowerCase();
-    if (fw !== "sidewalk") needTags.add(id);
-  }
-  const { tags, complete } = await lookupWayTags(needTags);
 
   const segments: SegmentInfo[] = [];
   const roadClassMix: Record<string, number> = {};
   const surfaceMix: Record<string, number> = {};
 
-  let dedicatedM = 0;
-  let taggedSidewalkM = 0;
-  let noSidewalkM = 0;
-  let unknownSidewalkM = 0;
-  let litM = 0;
-  let litKnownM = 0;
+  let pathM = 0;
   let highSpeedM = 0;
   let busyM = 0;
   let crossingCount = 0;
@@ -163,25 +178,14 @@ export async function enrichPath(path: GHPath): Promise<EnrichedPath> {
       rawSpeed === undefined || rawSpeed === null
         ? null
         : rawSpeed * KMH_TO_MPH;
-    const wayId = wayIds[i];
     const footway = (footways[i] ?? "missing").toLowerCase();
     const crossing = (crossings[i] ?? "missing").toLowerCase();
 
-    const wayTag = wayId !== undefined ? tags.get(wayId) : undefined;
-
-    // footway == sidewalk is GraphHopper telling us directly that this way is a
-    // sidewalk. It is the strongest signal available and needs no Overpass call.
-    const isNativeSidewalk = footway === "sidewalk";
-    const isDedicatedFootway =
-      isNativeSidewalk ||
-      DEDICATED_FOOTWAY.has(roadClass) ||
-      TRAIL_LIKE.has(roadClass);
-
-    const sidewalk: SidewalkSide = isDedicatedFootway
-      ? "both"
-      : (wayTag?.sidewalk ?? "unknown");
-
+    // A crossing way is technically a footway, but it runs across traffic, so
+    // it must not count toward car-free distance.
     const isCrossing = REAL_CROSSING.has(crossing) || footway === "crossing";
+    const isPath = PATH_CLASSES.has(roadClass) && !isCrossing;
+
     if (isCrossing && !prevWasCrossing) crossingCount++;
     prevWasCrossing = isCrossing;
 
@@ -189,29 +193,16 @@ export async function enrichPath(path: GHPath): Promise<EnrichedPath> {
       lengthM,
       roadClass,
       maxSpeed,
-      lit: wayTag?.lit ?? null,
       surface,
-      sidewalk,
-      isDedicatedFootway,
+      isPath,
       isCrossing,
+      crossing,
     });
 
     addTo(roadClassMix, roadClass, lengthM);
     addTo(surfaceMix, surface ?? "unknown", lengthM);
 
-    if (isDedicatedFootway) dedicatedM += lengthM;
-    else if (sidewalk === "both" || sidewalk === "yes" || sidewalk === "separate")
-      taggedSidewalkM += lengthM;
-    else if (sidewalk === "left" || sidewalk === "right")
-      taggedSidewalkM += lengthM * 0.7;
-    else if (sidewalk === "no") noSidewalkM += lengthM;
-    else unknownSidewalkM += lengthM;
-
-    const lit = wayTag?.lit ?? null;
-    if (lit !== null) {
-      litKnownM += lengthM;
-      if (lit) litM += lengthM;
-    }
+    if (isPath) pathM += lengthM;
     if (maxSpeed !== null && maxSpeed > HIGH_SPEED_MPH) highSpeedM += lengthM;
     if (BUSY.has(roadClass)) busyM += lengthM;
   }
@@ -227,7 +218,6 @@ export async function enrichPath(path: GHPath): Promise<EnrichedPath> {
   return {
     coordinates,
     distanceMi: totalM * M_TO_MI,
-    sidewalkDataAvailable: complete,
     segments,
     metrics: {
       distanceMi: totalM * M_TO_MI,
@@ -235,12 +225,8 @@ export async function enrichPath(path: GHPath): Promise<EnrichedPath> {
       elevationLossFt: (path.descend ?? 0) * M_TO_FT,
       roadClassMix,
       surfaceMix,
-      dedicatedFootwayPct: frac(dedicatedM),
-      taggedSidewalkPct: frac(taggedSidewalkM),
-      noSidewalkPct: frac(noSidewalkM),
-      unknownSidewalkPct: frac(unknownSidewalkM),
-      litPct: litKnownM > 0 ? litM / litKnownM : 0,
-      litKnownPct: frac(litKnownM),
+      retracePct: retraceShare(coordinates),
+      pathPct: frac(pathM),
       highSpeedPct: frac(highSpeedM),
       busyRoadPct: frac(busyM),
       crossingsOfMajorRoads: countMajorRoadCrossings(segments),

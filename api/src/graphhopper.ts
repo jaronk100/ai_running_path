@@ -7,8 +7,6 @@ const DETAILS = [
   "max_speed",
   "footway",
   "crossing",
-  "average_slope",
-  "osm_way_id",
 ];
 
 class GraphHopperError extends Error {
@@ -47,9 +45,33 @@ const baseBody = {
   "ch.disable": true,
 };
 
-// NOTE: GraphHopper's algorithm=round_trip was removed deliberately. Measured
-// against the Austin extract it returned 0.70x-8.59x the requested distance and
-// hit the +/-0.1 mi gate once in 48 tries. See loops.ts for what replaced it.
+/**
+ * One round_trip loop from `start`. Its length is only loosely related to
+ * `distanceMeters` -- loops.ts searches the request value per seed to land the
+ * tolerance. `seed` is the only lever for shape variety: the same seed and
+ * distance always return the same loop.
+ */
+export async function roundTrip(
+  start: LatLng,
+  distanceMeters: number,
+  seed: number,
+): Promise<GHPath | null> {
+  try {
+    const { paths } = await post({
+      ...baseBody,
+      points: [[start.lon, start.lat]],
+      algorithm: "round_trip",
+      "round_trip.distance": Math.max(200, Math.round(distanceMeters)),
+      "round_trip.seed": seed,
+    });
+    return paths[0] ?? null;
+  } catch (err) {
+    // A seed that lands in a dead end is normal, not exceptional. Only a
+    // transport-level failure should stop the whole search.
+    if (err instanceof GraphHopperError && err.status < 500) return null;
+    throw err;
+  }
+}
 
 /** Plain point-to-point route. Used for the approach leg and out-and-back legs. */
 export async function route(points: LatLng[]): Promise<GHPath | null> {
@@ -61,31 +83,6 @@ export async function route(points: LatLng[]): Promise<GHPath | null> {
     return paths[0] ?? null;
   } catch (err) {
     if (err instanceof GraphHopperError && err.status < 500) return null;
-    throw err;
-  }
-}
-
-/** Distinct point-to-point alternatives, for out-and-back variety. */
-export async function alternatives(
-  from: LatLng,
-  to: LatLng,
-  maxPaths: number,
-): Promise<GHPath[]> {
-  try {
-    const { paths } = await post({
-      ...baseBody,
-      points: [
-        [from.lon, from.lat],
-        [to.lon, to.lat],
-      ],
-      algorithm: "alternative_route",
-      "alternative_route.max_paths": maxPaths,
-      "alternative_route.max_share_factor": 0.5,
-      "alternative_route.max_weight_factor": 1.6,
-    });
-    return paths;
-  } catch (err) {
-    if (err instanceof GraphHopperError && err.status < 500) return [];
     throw err;
   }
 }

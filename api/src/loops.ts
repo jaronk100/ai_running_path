@@ -1,97 +1,58 @@
 import { config } from "./config.js";
-import { MI_TO_M, destinationPoint } from "./geo.js";
+import { MI_TO_M } from "./geo.js";
 import * as gh from "./graphhopper.js";
 import type { GHPath, LatLng } from "./types.js";
 
 /**
- * Loop generation by bisection on a fixed-shape polygon of via points.
+ * Loop generation: GraphHopper round_trip, with a per-seed secant search on the
+ * requested distance.
  *
- * GraphHopper's built-in `algorithm=round_trip` is not usable here. Measured
- * against the Austin extract it returned 0.70x to 8.59x the requested distance
- * and landed inside the +/- 0.1 mi gate 1 time in 48. Iterative correction did
- * not rescue it (17.7%): seed and distance jointly determine the loop's shape,
- * so changing the requested distance changes the route entirely and there is no
- * gradient to follow.
+ * History, because both simpler options were tried and measured on the
+ * Leander/Cedar Park extract:
  *
- * Here the shape is pinned by the bearings and only the radius varies, which
- * makes routed length monotonic in radius, so bisection actually converges.
- * Measured hit rate is ~37% at ~97 ms per attempt -- low per attempt, but cheap
- * enough that sweeping bearings and polygon sizes yields plenty of candidates.
+ * 1. round_trip as-is. Real loops -- it penalises edges it has already used, so
+ *    the return leg takes different streets -- but it returned 0.70x-8.59x the
+ *    requested length and hit the +/-0.1 mi gate 1 time in 48.
  *
- * It stays a step function (a small radius change can jump the route to the next
- * street over), which is why the remaining ~63% cannot be squeezed out with more
- * iterations. More attempts, not more precision.
+ * 2. Bisecting the radius of a polygon of via points. Hit the distance gate
+ *    reliably, but the "loops" were out-and-backs: ~100% of their length ran on
+ *    streets traversed twice, packed into a 0.2 x 0.3 mi footprint. In
+ *    cul-de-sac suburbia each via point lands in a separate residential pod
+ *    reachable only one way, so the router dips in and back out of every pod.
+ *
+ * This keeps round_trip's shapes and fixes its distance control. For a fixed
+ * seed, the overshoot ratio is locally stable enough that rescaling the request
+ * by how far the last probe missed often lands the next one. Measured over 1-6
+ * mi targets: roughly 3-9% of calls land in tolerance, and the loops average
+ * ~25% doubled-back (mostly the unavoidable stem out of a cul-de-sac) instead of
+ * ~100%. Each call is ~7 ms, so sweeping many seeds is cheap.
  */
 
-const MAX_ITERATIONS = 9;
+/** Median measured overshoot is ~2x, so start by asking for half. */
+const FIRST_SCALE = 0.5;
+const MAX_PROBES_PER_SEED = 6;
 
-/** Regular n-gon inscribed in radius r has perimeter 2*n*r*sin(pi/n). */
-function idealPerimeterFactor(sides: number): number {
-  return 2 * sides * Math.sin(Math.PI / sides);
-}
-
-export interface LoopAttempt {
-  path: GHPath;
-  errorMi: number;
-  radiusM: number;
-  ghCalls: number;
-}
-
-export async function generateLoop(
+export async function loopForSeed(
   start: LatLng,
-  targetMeters: number,
-  bearingDeg: number,
-  sides: number,
-): Promise<LoopAttempt | null> {
-  const factor = idealPerimeterFactor(sides);
-  // Bracket generously: street detours inflate the ideal perimeter by an amount
-  // that varies hugely with how gridded the local network is.
-  let lo = (targetMeters / factor) * 0.15;
-  let hi = (targetMeters / factor) * 2.5;
+  targetMi: number,
+  seed: number,
+): Promise<GHPath | null> {
+  const targetM = targetMi * MI_TO_M;
+  const minReq = targetM * 0.15;
+  const maxReq = targetM * 1.5;
+  let request = targetM * FIRST_SCALE;
 
-  let best: LoopAttempt | null = null;
-  let ghCalls = 0;
+  for (let i = 0; i < MAX_PROBES_PER_SEED; i++) {
+    const path = await gh.roundTrip(start, request, seed);
+    if (!path || path.distance <= 0) return null;
 
-  for (let i = 0; i < MAX_ITERATIONS; i++) {
-    const radiusM = (lo + hi) / 2;
+    const errorMi = Math.abs(path.distance - targetM) / MI_TO_M;
+    if (errorMi <= config.search.distanceToleranceMi) return path;
 
-    const points: LatLng[] = [start];
-    for (let s = 0; s < sides; s++) {
-      points.push(
-        destinationPoint(start, bearingDeg + (360 / sides) * s, radiusM),
-      );
-    }
-    points.push(start);
-
-    const path = await gh.route(points);
-    ghCalls++;
-    if (!path) break;
-
-    const errorMi = Math.abs(path.distance - targetMeters) / MI_TO_M;
-    if (!best || errorMi < best.errorMi) {
-      best = { path, errorMi, radiusM, ghCalls };
-    }
-    if (errorMi <= config.search.distanceToleranceMi) {
-      return { path, errorMi, radiusM, ghCalls };
-    }
-
-    if (path.distance < targetMeters) lo = radiusM;
-    else hi = radiusM;
+    request = Math.min(
+      maxReq,
+      Math.max(minReq, request * (targetM / path.distance)),
+    );
   }
-
-  // Only hand back a converged loop. A near miss is still the wrong distance,
-  // and the spec's tolerance is a hard gate rather than a preference.
-  if (best && best.errorMi <= config.search.distanceToleranceMi) return best;
   return null;
-}
-
-/** Bearing/shape combinations swept per start point, in priority order. */
-export function loopVariants(): { bearing: number; sides: number }[] {
-  const out: { bearing: number; sides: number }[] = [];
-  for (const sides of [3, 4, 5]) {
-    for (const bearing of [0, 45, 90, 135, 180, 225, 270, 315]) {
-      out.push({ bearing, sides });
-    }
-  }
-  return out;
 }

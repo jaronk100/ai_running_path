@@ -84,3 +84,33 @@ function gridKey([lon, lat]: [number, number]): string {
   const lonStep = latStep / Math.max(0.2, Math.cos(toRad(lat)));
   return `${Math.round(lat / latStep)}:${Math.round(lon / lonStep)}`;
 }
+
+/**
+ * Share of a path's length spent on street segments it traverses more than
+ * once: 0 is a true loop, 1 is a pure out-and-back. GraphHopper emits identical
+ * coordinates each time a route passes the same node, so a retraced segment
+ * has exactly matching endpoints in either direction.
+ */
+export function retraceShare(coords: [number, number][]): number {
+  const edgeKey = (a: [number, number], b: [number, number]) => {
+    const ka = `${a[0].toFixed(6)},${a[1].toFixed(6)}`;
+    const kb = `${b[0].toFixed(6)},${b[1].toFixed(6)}`;
+    return ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
+  };
+
+  const passes = new Map<string, number>();
+  for (let i = 1; i < coords.length; i++) {
+    const k = edgeKey(coords[i - 1]!, coords[i]!);
+    passes.set(k, (passes.get(k) ?? 0) + 1);
+  }
+
+  const lens = segmentLengths(coords);
+  let total = 0;
+  let repeated = 0;
+  for (let i = 1; i < coords.length; i++) {
+    const len = lens[i - 1]!;
+    total += len;
+    if ((passes.get(edgeKey(coords[i - 1]!, coords[i]!)) ?? 0) > 1) repeated += len;
+  }
+  return total > 0 ? repeated / total : 0;
+}

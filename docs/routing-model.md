@@ -17,19 +17,17 @@ road_class multiplier.
 ## Why sidewalk is not in here
 
 GraphHopper cannot expose OSM `sidewalk=*` as an encoded value without patching
-Java source. Upstream is explicit about it: "It is not yet possible without
-modifying the source code."
+Java source ("It is not yet possible without modifying the source code"). It was
+briefly fetched from Overpass instead, but in the Leander/Cedar Park extract
+roadway sidewalk tags were effectively absent, so the feature was dropped.
 
-That splits the requirement in two:
+What remains is the half of the requirement that has data everywhere: avoid
+fast, busy roads. That is expressed here through `road_class` and `max_speed`,
+and again in the traffic term of `api/src/scoring.ts`.
 
-- **Safety** — avoid sidewalk-less fast roads. Fully expressible here through
-  `road_class` and `max_speed`, both built in. This is the part that matters.
-- **Preference** — favour a street with a sidewalk over one without, all else
-  equal. Applied downstream in `api/src/scoring.ts`, joined through the
-  `osm_way_id` encoded value.
-
-Separately-drawn sidewalks need neither: they arrive as `road_class == FOOTWAY`
-and are boosted directly.
+The `footway == SIDEWALK` boost stays. It is not a sidewalk feature — it just
+keeps the router on a separately-drawn walkway rather than the carriageway
+beside it, where such a walkway exists. It costs nothing where none does.
 
 ## Freeway exclusion runs three times
 

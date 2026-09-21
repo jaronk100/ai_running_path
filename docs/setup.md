@@ -1,112 +1,96 @@
 # Setup
 
-## What your machine is missing
+## Quick start
 
-Checked on this box: Node 24 and git are present. **Java and Docker are not.**
-GraphHopper needs one of them. Pick either.
+Double-click **`start.cmd`** in the `runpath` folder. It:
 
-- **JDK 17+** — lighter, and the path GraphHopper documents best. Good for dev.
-- **Docker Desktop** — heavier install, but it is what you will deploy with, so
-  installing it now means dev and prod run the same thing.
+1. starts GraphHopper in its own window (skipped if already running),
+2. starts the API in another window (skipped if already running),
+3. waits until both answer, then opens <http://localhost:8080/viewer>.
 
-## 1. Get the Austin map data
+Close the two server windows to stop everything. Re-running `start.cmd` while
+they are up just opens the viewer again.
 
-Two options. Start with the small one.
+The first start after swapping the map file takes a few minutes while
+GraphHopper builds its graph. After that it starts in seconds.
 
-**BBBike custom extract (recommended for dev, ~50-100 MB).**
-Go to <https://extract.bbbike.org/>, draw a box around the Austin metro, choose
-format `Protocolbuffer (PBF)`, and enter your email. You get a download link in a
-few minutes. Save it as:
+## The route viewer
 
-    routing/data/region.osm.pbf
+<http://localhost:8080/viewer> — enter an address, a distance and a path type,
+and the top five routes are drawn on a map in different colours. Click a route
+card (or a line) to highlight it and zoom in. Dashed lines are the walk from
+the address to where a loop starts. "Next 5 routes" pages through the rest.
 
-**Geofabrik Texas (full state, ~1.5 GB, slow first import).**
+It is a development tool for judging route quality by eye — the thing no
+metric replaces — not the app itself.
+
+## What `start.cmd` needs
+
+Already in place on this machine:
+
+- **Java 21** (Eclipse Temurin). Any JDK 17+ works.
+- **Node 24** for the API.
+- **GraphHopper 11** — `routing/graphhopper-web-11.0.jar`. Not in git (45 MB);
+  if missing, download the `graphhopper-web` jar from the
+  [releases page](https://github.com/graphhopper/graphhopper/releases) into
+  `routing/`.
+- **Map data** — `routing/data/region.osm.pbf`, currently a BBBike extract of
+  Leander/Cedar Park (30.51-30.61 N, 97.77-97.96 W). Not in git.
+
+## Changing the map area
+
+Get a new extract from <https://extract.bbbike.org/> (draw a box, format
+"Protocolbuffer (PBF)"), or a whole state from Geofabrik:
 
 ```bash
 curl -L -o routing/data/region.osm.pbf https://download.geofabrik.de/north-america/us/texas-latest.osm.pbf
 ```
 
-The state file is what you want once friends and family outside Austin start
-testing. Everything in `routing/config.yml` is identical either way — only the
-import time and the RAM ceiling change.
+Save it as `routing/data/region.osm.pbf`, **delete `routing/graph-cache/`**,
+and restart. Skipping the delete makes GraphHopper silently reuse the old graph.
+The same applies after editing `graph.encoded_values` in `routing/config.yml`.
 
-## 2. Run GraphHopper
-
-### Option A — JAR
-
-Download the `graphhopper-web` shaded JAR from the
-[releases page](https://github.com/graphhopper/graphhopper/releases), drop it in
-`routing/`, then:
+## Running pieces by hand
 
 ```bash
-cd routing && java -Xmx4g -jar graphhopper-web-*.jar server config.yml
+cd routing && java -Xmx4g -jar graphhopper-web-11.0.jar server config.yml
 ```
-
-### Option B — Docker
-
-```bash
-docker compose up graphhopper
-```
-
-Either way the **first** boot imports the extract and builds the graph. That is
-minutes for Austin, considerably longer for all of Texas. Later boots reuse
-`routing/graph-cache/` and start in seconds.
-
-> Delete `routing/graph-cache/` whenever you change `graph.encoded_values` or
-> swap the `.pbf`. GraphHopper will otherwise silently reuse the stale graph and
-> you will spend an hour wondering why your config change did nothing.
-
-Confirm it is alive:
-
-```bash
-curl http://localhost:8989/health
-```
-
-## 3. Run the API
 
 ```bash
 cd api && npm install && npm run dev
 ```
 
 ```bash
-curl -s -X POST http://localhost:8080/search -H "content-type: application/json" -d "{\"address\":\"1100 Congress Ave, Austin, TX 78701\",\"distanceMi\":2.0,\"pathType\":\"loop\",\"maxApproachMi\":0.4}"
+curl -s -X POST http://localhost:8080/search -H "content-type: application/json" -d "{\"address\":\"550 Discovery Blvd, Cedar Park, TX 78613\",\"distanceMi\":2.0,\"pathType\":\"loop\",\"maxApproachMi\":0.4}"
 ```
 
-## 4. Tests
+## Tests
 
 ```bash
 cd api && npm test
 ```
 
-Ten tests cover the scoring function: approach dominance, the sidewalk
-preference ordering, freeway disqualification, elevation neutrality, and the
-`2A + (N x L)` distance math. They run without GraphHopper.
+Sixteen tests covering the ranking rules, loop-shape measurement, busy-crossing
+counting, freeway disqualification, elevation neutrality and the `2A + (N x L)`
+math. They run without GraphHopper.
 
 ## Known limits, honestly
 
-- **Sidewalk data is partial.** Austin OSM coverage is decent but nowhere near
-  complete. Unknown coverage is scored neutrally and never excludes a route, and
-  `/search` returns a `notes` array saying when data was missing. Do not let the
-  UI render "no sidewalk data" as "no sidewalk".
-- **`round_trip` is unusable and is no longer used.** Measured against the Austin
-  extract it returned 0.70x to 8.59x the requested distance and landed inside the
-  +/- 0.1 mi gate 1 time in 48. Per-seed iterative correction only reached 17.7%,
-  because seed and distance jointly determine the loop shape, so there is no
-  gradient to follow. Loops are now generated by bisecting the radius of a
-  fixed-shape polygon of via points (`api/src/loops.ts`), which converges ~37% of
-  the time at ~97 ms per attempt. Raise `maxLoopAttempts` if too few results come
-  back; do not loosen the tolerance.
-- **Cedar Park has no sidewalk or lighting tags at all.** Verified live: Overpass
-  answers fine, but roadway `sidewalk=*` and `lit=*` coverage in that extract is
-  effectively zero. The only sidewalk signal there is separately-drawn footways
-  (`footway == SIDEWALK`), which ran 0-26% of route length. Central Austin is
-  better tagged. Do not assume these fields carry signal everywhere.
-- **Overpass is rate-limited.** The public endpoint will not survive real
-  traffic. Stand up a private instance, or pre-extract sidewalk tags from the
-  `.pbf` you already downloaded, before launch.
+- **Longer loops have less variety.** Within 0.4 mi of a start, the Cedar Park
+  test address yields ~12 distinct 2 mi loops but only ~4 distinct 6 mi loops:
+  big loops from nearby starts converge on the same collector roads and are
+  merged as duplicates. Raising "max distance to loop start" helps (7 at 1 mi).
+- **Parking lots count as service roads.** OSM tags parking aisles as
+  `highway=service`, and GraphHopper has no value that separates them from
+  driveways and alleys. A loop can include laps of a shopping-centre car park.
+- **Busy-crossing counts are inferred.** A signalised crossing counts as busy
+  (signals clustered within 60 m count once); elsewhere, a short hop onto a
+  primary/secondary/tertiary road does. Unsignalised crossings of busy roads
+  via a mapped crosswalk can still be missed.
+- **Road class is not sidewalk.** A loop along a primary road ranks low even
+  where that road has a good sidewalk, because sidewalk data was dropped.
 - **The Google Maps link is approximate by construction.** Google's URL scheme
-  caps at 9 waypoints, so it re-routes between a skeleton of your route. GPX is
-  the faithful export. The API returns both; label them differently in the UI.
-- **Crossing counts are a heuristic.** GraphHopper does not surface OSM crossing
-  nodes, so `crossingsOfMajorRoads` infers them from short runs on busy classes.
-  Good enough to tell "crosses Lamar twice" from "runs up Lamar", not a survey.
+  caps at 9 waypoints, so it re-routes between a skeleton of the route. GPX is
+  the faithful export.
+- **Geocoding is US Census.** Free and keyless, good on street addresses, poor
+  on place names ("Cedar Park library" will not resolve; its street address will).

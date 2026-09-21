@@ -1,32 +1,21 @@
 import { createHash } from "node:crypto";
 import { config } from "./config.js";
-import { enrichPath, wayIdsOf, type EnrichedPath } from "./enrich.js";
+import { enrichPath, type EnrichedPath } from "./enrich.js";
 import { MI_TO_M, destinationPoint, geometryOverlap } from "./geo.js";
 import * as gh from "./graphhopper.js";
-import { generateLoop, loopVariants } from "./loops.js";
+import { loopForSeed } from "./loops.js";
 import { geocode } from "./geocode.js";
 import { pMap } from "./pmap.js";
 import { isDisqualified, scoreRoute } from "./scoring.js";
-import { lookupWayTags } from "./sidewalks.js";
-import type { LatLng, RouteCandidate, SearchRequest } from "./types.js";
+import type { GHPath, LatLng, RouteCandidate, SearchRequest } from "./types.js";
 
 const GH_CONCURRENCY = 6;
-const ENRICH_CONCURRENCY = 8;
-
-/** Collect way ids across many paths and warm the tag cache in one request. */
-async function prefetchTags(paths: { details?: unknown }[]): Promise<void> {
-  const ids = new Set<number>();
-  for (const p of paths) for (const id of wayIdsOf(p as never)) ids.add(id);
-  if (ids.size > 0) await lookupWayTags(ids);
-}
 
 export interface SearchResult {
   home: LatLng;
   matchedAddress: string;
   candidates: RouteCandidate[];
   totalFound: number;
-  /** True when Overpass answered for every route, so sidewalk figures are firm. */
-  sidewalkDataComplete: boolean;
 }
 
 export async function findRoutes(req: SearchRequest): Promise<SearchResult> {
@@ -49,7 +38,6 @@ export async function findRoutes(req: SearchRequest): Promise<SearchResult> {
     matchedAddress: geo.matchedAddress,
     candidates: deduped.slice((page - 1) * size, page * size),
     totalFound: deduped.length,
-    sidewalkDataComplete: deduped.every((c) => c.sidewalkDataAvailable),
   };
 }
 
@@ -76,44 +64,32 @@ async function findLoops(
   // last. Cheaper and better-aligned than sampling uniformly and truncating.
   starts.sort((a, b) => a.approachMi - b.approachMi);
 
-  const variants = loopVariants();
-  const jobs: { start: StartPoint; bearing: number; sides: number }[] = [];
+  const jobs: { start: StartPoint; seed: number }[] = [];
   for (const start of starts) {
-    for (const v of variants) jobs.push({ start, bearing: v.bearing, sides: v.sides });
+    for (let seed = 0; seed < config.search.seedsPerStart; seed++) {
+      jobs.push({ start, seed });
+    }
   }
-  const budgeted = jobs.slice(0, config.search.maxLoopAttempts);
+  const budgeted = jobs.slice(0, config.search.maxLoopSeeds);
 
   const paths = await pMap(budgeted, GH_CONCURRENCY, async (job) => {
-    const attempt = await generateLoop(
-      job.start.point,
-      req.distanceMi * MI_TO_M,
-      job.bearing,
-      job.sides,
-    );
-    return attempt ? { job, path: attempt.path } : null;
-  });
-
-  const hits = paths.filter((r) => r !== null);
-
-  // One Overpass query for every surviving route, rather than one per route.
-  // enrichPath then reads straight from cache instead of going out to network.
-  await prefetchTags(hits.map((r) => r.path));
-
-  const enrichedAll = await pMap(hits, ENRICH_CONCURRENCY, async (r) => {
-    // generateLoop already enforces the tolerance gate before returning.
-    const enriched = await enrichPath(r.path);
-    return isDisqualified(enriched) ? null : { enriched, job: r.job };
+    const path = await loopForSeed(job.start.point, req.distanceMi, job.seed);
+    return path ? { job, path } : null;
   });
 
   const out: RouteCandidate[] = [];
-  for (const e of enrichedAll) {
-    if (!e) continue;
+  for (const r of paths) {
+    if (!r) continue;
+    // loopForSeed already enforces the distance tolerance before returning.
+    const enriched = enrichPath(r.path);
+    if (isDisqualified(enriched)) continue;
+    if (enriched.metrics.retracePct > config.search.maxLoopRetrace) continue;
     out.push(
       toCandidate(
-        e.enriched,
+        enriched,
         "loop",
-        e.job.start.approachMi,
-        e.job.start.approachCoordinates,
+        r.job.start.approachMi,
+        r.job.start.approachCoordinates,
       ),
     );
   }
@@ -186,64 +162,82 @@ async function buildStartPoints(
 /**
  * Out-and-back starts at the door, so there is no approach leg and every
  * candidate scores identically on the approach term. Ranking falls entirely to
- * sidewalks, safety and quality. The requested distance is the full there-and-
- * back, so each leg targets half of it.
+ * traffic. The requested distance is the full there-and-back, so each leg
+ * targets half of it.
  */
 async function findOutAndBacks(
   home: LatLng,
   req: SearchRequest,
 ): Promise<RouteCandidate[]> {
-  const legTargetMi = req.distanceMi / 2;
   const bearings = config.search.approachSamples * 2;
-
-  // Crow-flies under-shoots real walking distance; 0.72 is a reasonable street-
-  // grid detour factor for turnaround sampling.
-  const turnarounds = Array.from({ length: bearings }, (_, i) =>
-    destinationPoint(home, (360 / bearings) * i, legTargetMi * 0.72 * MI_TO_M),
-  );
-
-  const legSets = await pMap(turnarounds, GH_CONCURRENCY, (t) =>
-    gh.alternatives(home, t, 3),
+  const legs = await pMap(
+    Array.from({ length: bearings }, (_, i) => (360 / bearings) * i),
+    GH_CONCURRENCY,
+    (bearing) => outAndBackLeg(home, req.distanceMi, bearing),
   );
 
   const out: RouteCandidate[] = [];
-  for (const legs of legSets) {
-    for (const leg of legs) {
-      const totalM = leg.distance * 2;
-      if (!withinTolerance(totalM, req.distanceMi)) continue;
+  for (const leg of legs) {
+    if (!leg) continue;
+    const enriched = enrichPath(leg);
+    if (isDisqualified(enriched)) continue;
 
-      const enriched = await enrichPath(leg);
-      if (isDisqualified(enriched)) continue;
+    // Metrics are length-weighted fractions, so retracing the same leg leaves
+    // every ratio unchanged; only the absolute distances double.
+    const climb =
+      enriched.metrics.elevationGainFt + enriched.metrics.elevationLossFt;
+    const doubled: EnrichedPath = {
+      ...enriched,
+      distanceMi: enriched.distanceMi * 2,
+      metrics: {
+        ...enriched.metrics,
+        distanceMi: enriched.metrics.distanceMi * 2,
+        // Out and back reverses the profile: every climb is also a descent.
+        elevationGainFt: climb,
+        elevationLossFt: climb,
+        crossingsOfMajorRoads: enriched.metrics.crossingsOfMajorRoads * 2,
+        totalCrossings: enriched.metrics.totalCrossings * 2,
+      },
+    };
 
-      // Metrics are length-weighted fractions, so retracing the same leg leaves
-      // every ratio unchanged; only the absolute distances double.
-      const climb =
-        enriched.metrics.elevationGainFt + enriched.metrics.elevationLossFt;
-      const doubled: EnrichedPath = {
-        ...enriched,
-        distanceMi: enriched.distanceMi * 2,
-        metrics: {
-          ...enriched.metrics,
-          distanceMi: enriched.metrics.distanceMi * 2,
-          // Out and back reverses the profile: every climb is also a descent.
-          elevationGainFt: climb,
-          elevationLossFt: climb,
-          crossingsOfMajorRoads: enriched.metrics.crossingsOfMajorRoads * 2,
-        },
-      };
-
-      out.push(toCandidate(doubled, "out_and_back", 0, []));
-    }
+    out.push(toCandidate(doubled, "out_and_back", 0, []));
   }
   return out;
 }
 
-// ------------------------------------------------------------- helpers
+/**
+ * The outbound leg of an out-and-back heading roughly along `bearing`, whose
+ * doubled length lands inside the tolerance. Bisects how far out the turnaround
+ * sits. Unlike a loop, a single point-to-point route grows fairly steadily with
+ * that distance, so bisection converges. The tolerance applies to the doubled
+ * total, so each leg effectively has to land within half of it.
+ */
+async function outAndBackLeg(
+  home: LatLng,
+  totalMi: number,
+  bearing: number,
+): Promise<GHPath | null> {
+  const legM = (totalMi / 2) * MI_TO_M;
+  let lo = legM * 0.2;
+  let hi = legM * 1.2;
 
-function withinTolerance(actualMeters: number, targetMi: number): boolean {
-  const actualMi = actualMeters / MI_TO_M;
-  return Math.abs(actualMi - targetMi) <= config.search.distanceToleranceMi;
+  for (let i = 0; i < 10; i++) {
+    const crowM = (lo + hi) / 2;
+    const leg = await gh.route([home, destinationPoint(home, bearing, crowM)]);
+    if (!leg) {
+      // Turnaround snapped somewhere unroutable; pull it in and retry.
+      hi = crowM;
+      continue;
+    }
+    const errMi = Math.abs(leg.distance * 2 - totalMi * MI_TO_M) / MI_TO_M;
+    if (errMi <= config.search.distanceToleranceMi) return leg;
+    if (leg.distance < legM) lo = crowM;
+    else hi = crowM;
+  }
+  return null;
 }
+
+// ------------------------------------------------------------- helpers
 
 function toCandidate(
   enriched: EnrichedPath,
@@ -262,7 +256,6 @@ function toCandidate(
     metrics: enriched.metrics,
     score,
     scoreBreakdown: breakdown,
-    sidewalkDataAvailable: enriched.sidewalkDataAvailable,
   };
 }
 
