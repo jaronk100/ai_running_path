@@ -1,31 +1,44 @@
 import { createHash } from "node:crypto";
 import { config } from "./config.js";
 import { enrichPath, type EnrichedPath } from "./enrich.js";
-import { MI_TO_M, destinationPoint, geometryOverlap } from "./geo.js";
+import { MI_TO_M, destinationPoint, geometryOverlap, haversineMeters } from "./geo.js";
 import * as gh from "./graphhopper.js";
-import { loopForSeed } from "./loops.js";
+import { loopForSeed, startNearest } from "./loops.js";
 import { geocode } from "./geocode.js";
 import { pMap } from "./pmap.js";
-import { isDisqualified, scoreRoute } from "./scoring.js";
+import { gateFailure, scoreRoute } from "./scoring.js";
 import type { GHPath, LatLng, RouteCandidate, SearchRequest } from "./types.js";
 
 const GH_CONCURRENCY = 6;
+
+/** A loop starting this close to the address starts at the door. */
+const AT_THE_DOOR_M = 20;
 
 export interface SearchResult {
   home: LatLng;
   matchedAddress: string;
   candidates: RouteCandidate[];
   totalFound: number;
+  /**
+   * Right-length routes dropped by a hard rule, by reason. Lets the UI say why
+   * a search came back thin instead of leaving the user to guess.
+   */
+  rejected: Record<string, number>;
 }
 
 export async function findRoutes(req: SearchRequest): Promise<SearchResult> {
   const geo = await geocode(req.address);
   if (!geo) throw new Error(`Could not geocode address: ${req.address}`);
 
+  const rejected: Record<string, number> = {};
+  const reject = (reason: string) => {
+    rejected[reason] = (rejected[reason] ?? 0) + 1;
+  };
+
   const candidates =
     req.pathType === "loop"
-      ? await findLoops(geo.point, req)
-      : await findOutAndBacks(geo.point, req);
+      ? await findLoops(geo.point, req, reject)
+      : await findOutAndBacks(geo.point, req, reject);
 
   const deduped = dedupe(candidates);
   deduped.sort((a, b) => b.score - a.score);
@@ -38,93 +51,109 @@ export async function findRoutes(req: SearchRequest): Promise<SearchResult> {
     matchedAddress: geo.matchedAddress,
     candidates: deduped.slice((page - 1) * size, page * size),
     totalFound: deduped.length,
+    rejected,
   };
 }
 
 // ---------------------------------------------------------------- loops
 
-interface StartPoint {
-  point: LatLng;
-  approachMi: number;
-  approachCoordinates: [number, number][];
-}
-
 async function findLoops(
   home: LatLng,
   req: SearchRequest,
+  reject: (reason: string) => void,
 ): Promise<RouteCandidate[]> {
   const maxApproachMi = Math.min(
     req.maxApproachMi ?? 0.5,
     config.search.maxApproachCapMi,
   );
-  const starts = await buildStartPoints(home, maxApproachMi);
+  const seeds = await seedPoints(home, maxApproachMi);
 
-  // Closest starts first, so trimming to the job budget below discards the
-  // furthest ones — the same candidates the approach term would have ranked
-  // last. Cheaper and better-aligned than sampling uniformly and truncating.
-  starts.sort((a, b) => a.approachMi - b.approachMi);
-
-  const jobs: { start: StartPoint; seed: number }[] = [];
-  for (const start of starts) {
+  const jobs: { point: LatLng; seed: number }[] = [];
+  for (const point of seeds) {
     for (let seed = 0; seed < config.search.seedsPerStart; seed++) {
-      jobs.push({ start, seed });
+      jobs.push({ point, seed });
     }
   }
   const budgeted = jobs.slice(0, config.search.maxLoopSeeds);
 
-  const paths = await pMap(budgeted, GH_CONCURRENCY, async (job) => {
-    const path = await loopForSeed(job.start.point, req.distanceMi, job.seed);
-    return path ? { job, path } : null;
+  const found = await pMap(budgeted, GH_CONCURRENCY, (job) =>
+    loopForSeed(job.point, req.distanceMi, job.seed, (loop) => {
+      const enriched = enrichPath(loop);
+      const failure = gateFailure(enriched, "loop");
+      if (failure) {
+        reject(failure);
+        return null;
+      }
+      return enriched;
+    }),
+  );
+
+  // The walk to each loop's start is routed fresh from the address. Where the
+  // loop came from round_trip at the door, this is its stem; elsewhere it is
+  // the shortest compliant way there.
+  const withApproach = await pMap(found, GH_CONCURRENCY, async (found) => {
+    if (!found) return null;
+    const f = restartNearHome(found, home);
+    const gapM = haversineMeters(home, f.junction);
+    if (gapM <= AT_THE_DOOR_M) return { f, approachMi: 0, approach: [] as [number, number][] };
+
+    const leg = await gh.route([home, f.junction]);
+    if (!leg) return null;
+    const approachMi = leg.distance / MI_TO_M;
+    if (approachMi > maxApproachMi) {
+      reject("loop starts too far away");
+      return null;
+    }
+    return {
+      f,
+      approachMi,
+      approach: leg.points.coordinates.map(([lon, lat]) => [lon, lat] as [number, number]),
+    };
   });
 
   const out: RouteCandidate[] = [];
-  for (const r of paths) {
+  for (const r of withApproach) {
     if (!r) continue;
-    // loopForSeed already enforces the distance tolerance before returning.
-    const enriched = enrichPath(r.path);
-    if (isDisqualified(enriched)) continue;
-    if (enriched.metrics.retracePct > config.search.maxLoopRetrace) continue;
-    out.push(
-      toCandidate(
-        enriched,
-        "loop",
-        r.job.start.approachMi,
-        r.job.start.approachCoordinates,
-      ),
-    );
+    out.push(toCandidate(r.f.judged, "loop", r.approachMi, r.approach));
   }
   return out;
 }
 
 /**
- * Loop start points: the door itself, plus a ring of sampled bearings. Each
- * sample is routed from home so approachMi is real walking distance on a
- * compliant path, not crow-flies. A creek or a freeway between the two makes
- * those numbers wildly different, and the ranking leans on this value hardest.
+ * Begin the loop at its point nearest the address rather than wherever
+ * round_trip happened to launch it. Kept only if the re-started loop still
+ * passes every rule; the geometry is the same, but the seam moves.
  */
-async function buildStartPoints(
+function restartNearHome(
+  f: { loop: GHPath; junction: LatLng; judged: EnrichedPath },
   home: LatLng,
-  maxApproachMi: number,
-): Promise<StartPoint[]> {
-  const starts: StartPoint[] = [
-    { point: home, approachMi: 0, approachCoordinates: [] },
-  ];
-  if (maxApproachMi <= 0) return starts;
+): { loop: GHPath; junction: LatLng; judged: EnrichedPath } {
+  const loop = startNearest(f.loop, home);
+  if (loop === f.loop) return f;
+  const judged = enrichPath(loop);
+  if (gateFailure(judged, "loop")) return f;
+  const [lon, lat] = loop.points.coordinates[0]!;
+  return { loop, junction: { lon, lat }, judged };
+}
+
+/**
+ * Where round_trip is launched from: the door, plus points sampled on rings
+ * around it, closest first so the seed budget goes where the ranking will look.
+ * These only seed variety -- a loop's real start is wherever its stem ends, and
+ * its approach is routed separately.
+ */
+async function seedPoints(home: LatLng, maxApproachMi: number): Promise<LatLng[]> {
+  const points: { point: LatLng; walkMi: number }[] = [{ point: home, walkMi: 0 }];
+  if (maxApproachMi <= 0) return [home];
 
   const samples: LatLng[] = [];
   const bearings = config.search.approachSamples;
-  // Rings are biased toward home rather than spread evenly. Scoring punishes
-  // approach distance steeply, so an even spread would spend most of its
-  // samples on starts that can never win — at a 5 mi cap, even spacing would
-  // leave nothing at all between the door and 2.75 mi out.
+  // Rings are biased toward home rather than spread evenly: scoring punishes
+  // approach distance steeply, so far samples mostly seed loops that lose.
   for (const ratio of [0.25, 0.5, 0.8]) {
     for (let i = 0; i < bearings; i++) {
       samples.push(
-        destinationPoint(
-          home,
-          (360 / bearings) * i,
-          maxApproachMi * ratio * MI_TO_M,
-        ),
+        destinationPoint(home, (360 / bearings) * i, maxApproachMi * ratio * MI_TO_M),
       );
     }
   }
@@ -134,40 +163,32 @@ async function buildStartPoints(
   const seen = new Set<string>();
   for (const leg of legs) {
     if (!leg) continue;
-    const approachMi = leg.distance / MI_TO_M;
-    if (approachMi > maxApproachMi) continue;
-
-    const coords = leg.points.coordinates.map(
-      ([lon, lat]) => [lon, lat] as [number, number],
-    );
-    const end = coords.at(-1);
+    const walkMi = leg.distance / MI_TO_M;
+    if (walkMi > maxApproachMi) continue;
+    const end = leg.points.coordinates.at(-1);
     if (!end) continue;
-
     // Several bearings often snap to the same corner; keep one.
     const key = `${end[1].toFixed(4)}:${end[0].toFixed(4)}`;
     if (seen.has(key)) continue;
     seen.add(key);
-
-    starts.push({
-      point: { lon: end[0], lat: end[1] },
-      approachMi,
-      approachCoordinates: coords,
-    });
+    points.push({ point: { lon: end[0], lat: end[1] }, walkMi });
   }
-  return starts;
+
+  points.sort((a, b) => a.walkMi - b.walkMi);
+  return points.map((p) => p.point);
 }
 
 // -------------------------------------------------------- out and back
 
 /**
  * Out-and-back starts at the door, so there is no approach leg and every
- * candidate scores identically on the approach term. Ranking falls entirely to
- * traffic. The requested distance is the full there-and-back, so each leg
- * targets half of it.
+ * candidate scores identically on the approach term. The requested distance is
+ * the full there-and-back, so each leg targets half of it.
  */
 async function findOutAndBacks(
   home: LatLng,
   req: SearchRequest,
+  reject: (reason: string) => void,
 ): Promise<RouteCandidate[]> {
   const bearings = config.search.approachSamples * 2;
   const legs = await pMap(
@@ -180,7 +201,11 @@ async function findOutAndBacks(
   for (const leg of legs) {
     if (!leg) continue;
     const enriched = enrichPath(leg);
-    if (isDisqualified(enriched)) continue;
+    const failure = gateFailure(enriched, "out_and_back");
+    if (failure) {
+      reject(failure);
+      continue;
+    }
 
     // Metrics are length-weighted fractions, so retracing the same leg leaves
     // every ratio unchanged; only the absolute distances double.
@@ -245,7 +270,7 @@ function toCandidate(
   approachMi: number,
   approachCoordinates: [number, number][],
 ): RouteCandidate {
-  const { score, breakdown } = scoreRoute(enriched, approachMi);
+  const { score, breakdown } = scoreRoute(enriched, approachMi, pathType);
   return {
     id: routeId(enriched.coordinates),
     pathType,

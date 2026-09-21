@@ -1,23 +1,28 @@
+import { config } from "./config.js";
 import type { EnrichedPath, SegmentInfo } from "./enrich.js";
+import { MI_TO_M } from "./geo.js";
+import type { PathType } from "./types.js";
 
 /**
+ * Hard rules live in gateFailure(); everything that passes them is ranked by
+ * three terms.
+ *
  * Approach distance dominates by explicit instruction: results are ranked
  * "giving greatest weight to having the lowest possible distance from starting
  * point".
  *
- * Traffic carries the rest of the original sidewalk rule -- "sidewalk-less is
- * fine on a quiet street, not on a busy one" -- using road class and posted
- * speed, which OSM has everywhere. Sidewalk and streetlight tags were dropped:
- * in the Leander/Cedar Park extract they were effectively absent.
+ * Traffic carries the "quiet streets are fine without sidewalks, busy ones are
+ * not" rule using road class and posted speed, which OSM has everywhere.
+ * Sidewalk and streetlight tags were dropped: in the Leander/Cedar Park extract
+ * they were effectively absent.
  *
- * Shape rewards loops that are actually loops. Some doubling back is
- * unavoidable (the stem out of a cul-de-sac), so it is a preference here, with
- * a hard ceiling applied upstream in candidates.ts. An out-and-back leg never
- * retraces itself, so that path type scores full marks and competes on the
- * other two terms.
+ * Shape is roundness. Doubling back is already gated out, so what separates the
+ * survivors is whether they look like "a loop as imagined" or a thin hairpin up
+ * one street and down the next. Out-and-backs take full marks here; they only
+ * ever compete with each other.
  *
  * Requested distance is NOT a weight. It is a hard gate (+/- 0.1 mi) applied
- * before scoring, so everything here is already the right length.
+ * during generation, so everything here is already the right length.
  *
  * Elevation is deliberately absent. The spec says report it, never rank on it.
  */
@@ -27,6 +32,10 @@ export const WEIGHTS = {
   shape: 15,
 } as const;
 
+/** Roundness at or above this scores full marks: roughly a 3:1 rectangle, which
+ *  street grids rarely beat once their zigzags inflate the perimeter. */
+const FULL_ROUNDNESS = 0.6;
+
 /** Freeway classes. Presence of any is disqualifying, not merely penalised. */
 const FORBIDDEN = new Set([
   "motorway",
@@ -35,16 +44,19 @@ const FORBIDDEN = new Set([
   "trunk_link",
 ]);
 
+const MAJOR_ROADS = ["primary", "secondary", "primary_link", "secondary_link"];
+
 /**
  * 1 = no traffic at all, 0 = hostile arterial. Car-free paths sit at the top;
- * residential streets just below, since they do carry some cars.
+ * residential streets just below, since they do carry some cars. Service roads
+ * rank low because in OSM that class is mostly parking-lot aisles.
  */
 const CLASS_QUIETNESS: Record<string, number> = {
   living_street: 0.95,
   residential: 0.9,
-  service: 0.85,
   unclassified: 0.75,
   road: 0.7,
+  service: 0.45,
   tertiary: 0.45,
   tertiary_link: 0.4,
   secondary: 0.2,
@@ -97,6 +109,29 @@ export function isDisqualified(path: EnrichedPath): boolean {
   return path.segments.some((s) => FORBIDDEN.has(s.roadClass));
 }
 
+export function majorRoadShare(path: EnrichedPath): number {
+  return MAJOR_ROADS.reduce((sum, k) => sum + (path.metrics.roadClassMix[k] ?? 0), 0);
+}
+
+/**
+ * The first hard rule a route breaks, or null if it may be shown. For a loop,
+ * `path` is the loop proper -- the stem has already been cut away as approach.
+ */
+export function gateFailure(path: EnrichedPath, pathType: PathType): string | null {
+  const g = config.gates;
+  if (isDisqualified(path)) return "freeway";
+  if (majorRoadShare(path) > g.maxMajorRoadShare) return "major roads";
+  if (pathType === "loop") {
+    const doubledM = path.metrics.retracePct * path.metrics.distanceMi * MI_TO_M;
+    if (doubledM > g.maxLoopDoubleBackM) return "doubles back";
+    if ((path.metrics.roadClassMix["service"] ?? 0) > g.maxLoopServiceShare) {
+      return "parking lots";
+    }
+    if (path.metrics.roundness < g.minLoopRoundness) return "hairpin";
+  }
+  return null;
+}
+
 export interface ScoreResult {
   score: number;
   breakdown: Record<string, number>;
@@ -105,6 +140,7 @@ export interface ScoreResult {
 export function scoreRoute(
   path: EnrichedPath,
   approachMi: number,
+  pathType: PathType,
 ): ScoreResult {
   const approach = approachScore(approachMi);
 
@@ -116,7 +152,8 @@ export function scoreRoute(
     lengthWeighted(path.segments, quietness) - crossingPenalty,
   );
 
-  const shape = clamp01(1 - path.metrics.retracePct);
+  const shape =
+    pathType === "loop" ? clamp01(path.metrics.roundness / FULL_ROUNDNESS) : 1;
 
   const breakdown = {
     approach: approach * WEIGHTS.approach,

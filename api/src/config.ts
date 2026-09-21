@@ -18,18 +18,39 @@ export const config = {
     approachSamples: 12,
     /** round_trip seeds tried per loop start point. Seed is the only source of
      *  shape variety, so this sets how many distinct loops each start offers. */
-    seedsPerStart: 20,
+    seedsPerStart: 40,
     /**
      * Ceiling on seed searches per request. Each costs up to 6 GraphHopper
-     * calls at ~7 ms, and about 1 in 5 lands a loop inside the tolerance.
-     * Taken closest-start-first, so trimming drops what the scorer ranks lowest.
+     * calls at ~7 ms. Taken closest-start-first, so trimming drops what the
+     * scorer ranks lowest. Measured from the Leander library: 160 -> 320 took
+     * 4 mi loops from 2 to 3 at ~5 s a search; 640 added little more at 12-19 s.
+     * Past this point the limit is the street network, not the budget.
      */
-    maxLoopSeeds: 160,
-    /** A "loop" with more than this share of streets run twice is really an
-     *  out-and-back, and is dropped from loop results. */
-    maxLoopRetrace: 0.5,
+    maxLoopSeeds: 320,
     /** Two candidates sharing more than this fraction of geometry are dupes. */
     maxGeometryOverlap: 0.6,
     resultsPerPage: 5,
+  },
+
+  /**
+   * Hard rules. A route breaking any of these is dropped, never merely ranked
+   * lower -- each one is something the user has said they do not want to run.
+   */
+  gates: {
+    /** A loop may not double back. This much is tolerated only for geometry
+     *  noise, such as crossing a divided road at the loop's own junction. */
+    maxLoopDoubleBackM: 30,
+    /** Primary/secondary roads. Enough to cross or briefly connect, not to run
+     *  along: 38% put an otherwise good loop out of contention. */
+    maxMajorRoadShare: 0.1,
+    /** Service roads, which is how OSM tags parking-lot aisles -- GraphHopper
+     *  cannot tell the two apart. Loops only: an out-and-back from a library
+     *  necessarily starts in its car park, and cannot circle one. */
+    maxLoopServiceShare: 0.1,
+    /** Roundness (4*pi*area / perimeter^2) below this is a hairpin: out along one
+     *  way and back along a parallel one just beyond the 25 m same-road reach --
+     *  a divided road, or a frontage road. Real loops here measure 0.3-0.55;
+     *  the hairpin that prompted this measured 0.06. */
+    minLoopRoundness: 0.15,
   },
 } as const;

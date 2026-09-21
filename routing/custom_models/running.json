@@ -14,7 +14,7 @@
     { "else_if": "road_class == RESIDENTIAL", "multiply_by": "1.2" },
     { "else_if": "road_class == TRACK",       "multiply_by": "1.1" },
     { "else_if": "road_class == UNCLASSIFIED", "multiply_by": "0.9" },
-    { "else_if": "road_class == SERVICE",     "multiply_by": "0.8" },
+    { "else_if": "road_class == SERVICE",     "multiply_by": "0.3" },
     { "else_if": "road_class == TERTIARY",    "multiply_by": "0.55" },
     { "else_if": "road_class == SECONDARY",   "multiply_by": "0.3" },
     { "else_if": "road_class == PRIMARY",     "multiply_by": "0.12" },

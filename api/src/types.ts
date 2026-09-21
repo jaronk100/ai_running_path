@@ -42,9 +42,11 @@ export interface RouteMetrics {
   roadClassMix: Record<string, number>;
   surfaceMix: Record<string, number>;
 
-  /** Share of length on streets the route runs more than once. 0 = true loop,
-   *  1 = pure out-and-back. The stem out of a cul-de-sac is the usual cause. */
+  /** Share of length covered again in the opposite direction, judged by
+   *  geometry so opposite sidewalks of one road count. 0 = never doubles back. */
   retracePct: number;
+  /** 4*pi*area / perimeter^2 of the route. 1 = circle, ~0 = hairpin. */
+  roundness: number;
   /** Share on car-free ways: footpaths, trails, separately-drawn walkways. */
   pathPct: number;
   /** Share on roads posted above 35 mph. */

@@ -96,7 +96,7 @@
       <h1>RunPath <span>route viewer</span></h1>
       <label>Start address
         <input name="address" required autocomplete="street-address"
-               value="550 Discovery Blvd, Cedar Park, TX 78613">
+               value="1011 S Bagdad Rd, Leander, TX 78641">
       </label>
       <div class="row">
         <label>Distance (mi)
@@ -229,10 +229,16 @@
       const secs = ((performance.now() - t0) / 1000).toFixed(1);
       const first = (state.page - 1) * PAGE_SIZE + 1;
       const last = first + body.candidates.length - 1;
+      // Say why a search came back thin: right-length routes that broke a rule.
+      const rejected = Object.entries(body.rejected ?? {})
+        .sort((a, b) => b[1] - a[1])
+        .map(([reason, n]) => `${n} ${reason}`)
+        .join(", ");
+      const why = rejected ? ` Right length but excluded: ${rejected}.` : "";
       setStatus(
         body.totalFound === 0
-          ? `No routes matched within ±0.1 mi (${secs}s). Try a different distance or a larger max distance to start.`
-          : `${body.totalFound} routes found in ${secs}s · showing ${first}–${last}`,
+          ? `No routes matched within ±0.1 mi (${secs}s).${why}`
+          : `${body.totalFound} routes found in ${secs}s · showing ${first}–${last}.${why}`,
       );
       els.next.hidden = state.page * PAGE_SIZE >= body.totalFound;
       render();
@@ -371,9 +377,10 @@
         ["Car-free", pct(m.pathPct)],
         ["Busy crossings", String(m.crossingsOfMajorRoads)],
       ];
-      // A loop that repeats streets is partly an out-and-back. Worth seeing,
-      // since it is the difference between a loop and a lollipop.
-      if (isLoop) rows.push(["Repeats streets", pct(m.retracePct)]);
+      if (isLoop) {
+        const doubledFt = Math.round(m.retracePct * m.distanceMi * 5280);
+        rows.push(["Doubles back", doubledFt < 10 ? "never" : `${doubledFt} ft`]);
+      }
       const dl = document.createElement("dl");
       for (const [k, v] of rows) {
         const dt = document.createElement("dt");

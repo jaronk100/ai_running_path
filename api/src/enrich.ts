@@ -1,4 +1,5 @@
-import { M_TO_FT, M_TO_MI, retraceShare, segmentLengths } from "./geo.js";
+import { M_TO_FT, M_TO_MI, segmentLengths } from "./geo.js";
+import { doubledBackShare, roundness } from "./shape.js";
 import type { DetailInterval, GHPath, RouteMetrics } from "./types.js";
 
 /** GraphHopper reports max_speed in km/h. Everything downstream is mph. */
@@ -80,7 +81,7 @@ export interface SegmentInfo {
  * Intervals are [fromPointIdx, toPointIdx, value] and segment i spans points
  * i..i+1, so an interval covers segments [from, to).
  */
-function perSegment<T>(
+export function perSegment<T>(
   intervals: DetailInterval<T>[] | undefined,
   segCount: number,
 ): (T | undefined)[] {
@@ -225,7 +226,8 @@ export function enrichPath(path: GHPath): EnrichedPath {
       elevationLossFt: (path.descend ?? 0) * M_TO_FT,
       roadClassMix,
       surfaceMix,
-      retracePct: retraceShare(coordinates),
+      retracePct: doubledBackShare(coordinates),
+      roundness: roundness(coordinates),
       pathPct: frac(pathM),
       highSpeedPct: frac(highSpeedM),
       busyRoadPct: frac(busyM),

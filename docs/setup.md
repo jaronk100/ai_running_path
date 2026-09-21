@@ -48,7 +48,12 @@ curl -L -o routing/data/region.osm.pbf https://download.geofabrik.de/north-ameri
 
 Save it as `routing/data/region.osm.pbf`, **delete `routing/graph-cache/`**,
 and restart. Skipping the delete makes GraphHopper silently reuse the old graph.
-The same applies after editing `graph.encoded_values` in `routing/config.yml`.
+
+The same delete-and-restart is needed after editing **either**
+`graph.encoded_values` in `routing/config.yml` **or** the routing model
+`routing/custom_models/running.json`. For the routing model GraphHopper is not
+silent: it refuses to start with "Profiles do not match". The rebuild took
+about 7 seconds for the Leander/Cedar Park extract.
 
 ## Running pieces by hand
 
@@ -70,23 +75,30 @@ curl -s -X POST http://localhost:8080/search -H "content-type: application/json"
 cd api && npm test
 ```
 
-Sixteen tests covering the ranking rules, loop-shape measurement, busy-crossing
-counting, freeway disqualification, elevation neutrality and the `2A + (N x L)`
-math. They run without GraphHopper.
+Twenty-nine tests covering the hard rules (doubling back, including the
+opposite-sidewalk case; hairpins; parking lots; major roads), stem and spur
+handling, re-starting a loop near the address, busy-crossing counting, ranking,
+and the `2A + (N x L)` math. They run without GraphHopper.
 
 ## Known limits, honestly
 
-- **Longer loops have less variety.** Within 0.4 mi of a start, the Cedar Park
-  test address yields ~12 distinct 2 mi loops but only ~4 distinct 6 mi loops:
-  big loops from nearby starts converge on the same collector roads and are
-  merged as duplicates. Raising "max distance to loop start" helps (7 at 1 mi).
-- **Parking lots count as service roads.** OSM tags parking aisles as
-  `highway=service`, and GraphHopper has no value that separates them from
-  driveways and alleys. A loop can include laps of a shopping-centre car park.
+- **Some distances have no loop.** Loops that follow every rule come in the
+  sizes the street network allows. From the Leander library (start within
+  0.4 mi): 1.5, 2 and 4 mi have loops; 2.5, 3, 4.5 and 5 mi have none — every
+  right-length loop doubled back somewhere. The viewer reports how many
+  right-length routes each rule excluded, so an empty result explains itself.
+- **Searches take 4-8 s**, most of it trying seeds that turn out to double back.
+  Quadrupling the attempts (to 12-19 s) found almost nothing more; past this
+  point the limit is the streets, not the budget.
+- **Parking lots are recognised only as service roads.** OSM tags parking
+  aisles as `highway=service`, and GraphHopper has no value separating them
+  from driveways and alleys. Loops over 10% service road are dropped, which also
+  drops the occasional loop using a legitimate alley.
 - **Busy-crossing counts are inferred.** A signalised crossing counts as busy
   (signals clustered within 60 m count once); elsewhere, a short hop onto a
   primary/secondary/tertiary road does. Unsignalised crossings of busy roads
-  via a mapped crosswalk can still be missed.
+  via a mapped crosswalk are still missed: the 4 mi Leander loop crosses San
+  Gabriel Pkwy twice and reports 0.
 - **Road class is not sidewalk.** A loop along a primary road ranks low even
   where that road has a good sidewalk, because sidewalk data was dropped.
 - **The Google Maps link is approximate by construction.** Google's URL scheme

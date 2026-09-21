@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { enrichPath, type EnrichedPath, type SegmentInfo } from "./enrich.js";
-import { geometryOverlap, retraceShare } from "./geo.js";
+import { geometryOverlap } from "./geo.js";
 import { simplifyByDistance, totalRunMiles } from "./export.js";
 import {
   approachScore,
+  gateFailure,
   isDisqualified,
   quietness,
   scoreRoute,
@@ -32,6 +33,7 @@ function metrics(over: Partial<RouteMetrics> = {}): RouteMetrics {
     roadClassMix: {},
     surfaceMix: { asphalt: 1 },
     retracePct: 0,
+    roundness: 0.7,
     pathPct: 0,
     highSpeedPct: 0,
     busyRoadPct: 0,
@@ -70,8 +72,8 @@ test("approach score decays monotonically and is uncapped", () => {
 
 test("approach dominates ranking, per the spec", () => {
   // An all-trail loop far away vs an ordinary residential loop at the door.
-  const far = scoreRoute(path([trail()]), 0.9);
-  const near = scoreRoute(path([seg()]), 0.05);
+  const far = scoreRoute(path([trail()]), 0.9, "loop");
+  const near = scoreRoute(path([seg()]), 0.05, "loop");
   assert.ok(
     near.score > far.score,
     `near residential (${near.score}) should beat far trail (${far.score})`,
@@ -79,7 +81,7 @@ test("approach dominates ranking, per the spec", () => {
 });
 
 test("approach carries the largest weight of the three terms", () => {
-  const best = scoreRoute(path([trail()]), 0);
+  const best = scoreRoute(path([trail()]), 0, "loop");
   assert.ok(best.breakdown["approach"]! > best.breakdown["traffic"]!);
   assert.ok(best.breakdown["approach"]! > best.breakdown["shape"]!);
   assert.equal(best.score, 100);
@@ -114,44 +116,55 @@ test("a path is not penalised for lacking a posted speed", () => {
 });
 
 test("major-road crossings lower the traffic term", () => {
-  const none = scoreRoute(path([seg()], { crossingsOfMajorRoads: 0 }), 0);
-  const many = scoreRoute(path([seg()], { crossingsOfMajorRoads: 3 }), 0);
+  const none = scoreRoute(path([seg()], { crossingsOfMajorRoads: 0 }), 0, "loop");
+  const many = scoreRoute(path([seg()], { crossingsOfMajorRoads: 3 }), 0, "loop");
   assert.ok(many.breakdown["traffic"]! < none.breakdown["traffic"]!);
 });
 
 test("more trail and less arterial scores higher", () => {
-  const trailHeavy = scoreRoute(path([trail(), trail(), seg()]), 0);
+  const trailHeavy = scoreRoute(path([trail(), trail(), seg()]), 0, "loop");
   const roadHeavy = scoreRoute(
     path([seg({ roadClass: "tertiary", maxSpeed: 40 }), seg(), seg()]),
-    0,
-  );
+    0, "loop");
   assert.ok(trailHeavy.score > roadHeavy.score);
 });
 
-test("retrace share is 0 for a true loop and 1 for an out-and-back", () => {
-  const square: [number, number][] = [
-    [-97.8, 30.5], [-97.79, 30.5], [-97.79, 30.51], [-97.8, 30.51], [-97.8, 30.5],
-  ];
-  const outAndBack: [number, number][] = [
-    [-97.8, 30.5], [-97.79, 30.5], [-97.78, 30.5], [-97.79, 30.5], [-97.8, 30.5],
-  ];
-  // Lollipop: a stem out and back, with a loop on the end of it.
-  const lollipop: [number, number][] = [
-    [-97.8, 30.5], [-97.79, 30.5],
-    [-97.78, 30.5], [-97.78, 30.51], [-97.79, 30.51], [-97.79, 30.5],
-    [-97.8, 30.5],
-  ];
-  assert.equal(retraceShare(square), 0);
-  assert.equal(retraceShare(outAndBack), 1);
-  const stem = retraceShare(lollipop);
-  assert.ok(stem > 0.2 && stem < 0.5, `lollipop stem share ${stem}`);
+test("a rounder loop scores higher on shape", () => {
+  const round = scoreRoute(path([seg()], { roundness: 0.65 }), 0, "loop");
+  const hairpin = scoreRoute(path([seg()], { roundness: 0.1 }), 0, "loop");
+  assert.ok(hairpin.breakdown["shape"]! < round.breakdown["shape"]!);
+  assert.ok(hairpin.score < round.score);
 });
 
-test("doubling back lowers the shape term", () => {
-  const clean = scoreRoute(path([seg()], { retracePct: 0 }), 0);
-  const doubled = scoreRoute(path([seg()], { retracePct: 0.4 }), 0);
-  assert.ok(doubled.breakdown["shape"]! < clean.breakdown["shape"]!);
-  assert.ok(doubled.score < clean.score);
+test("out-and-backs are not marked down for not being round", () => {
+  const ob = scoreRoute(path([seg()], { roundness: 0 }), 0, "out_and_back");
+  assert.equal(ob.breakdown["shape"], 15);
+});
+
+test("hard rules drop routes the user said they will not run", () => {
+  const ok = path([seg()], { distanceMi: 2, roadClassMix: { residential: 1 } });
+  assert.equal(gateFailure(ok, "loop"), null);
+
+  const arterial = path([seg()], { roadClassMix: { residential: 0.62, primary: 0.38 } });
+  assert.equal(gateFailure(arterial, "loop"), "major roads");
+  assert.equal(gateFailure(arterial, "out_and_back"), "major roads");
+
+  const costco = path([seg()], { roadClassMix: { tertiary: 0.77, service: 0.23 } });
+  assert.equal(gateFailure(costco, "loop"), "parking lots");
+  assert.equal(gateFailure(costco, "out_and_back"), null, "an out-and-back cannot circle a lot");
+
+  // 2 mi loop, 5% doubled back is ~160 m -- far past geometry noise.
+  const doubling = path([seg()], { distanceMi: 2, retracePct: 0.05, roadClassMix: { residential: 1 } });
+  assert.equal(gateFailure(doubling, "loop"), "doubles back");
+  const noise = path([seg()], { distanceMi: 2, retracePct: 0.005, roadClassMix: { residential: 1 } });
+  assert.equal(gateFailure(noise, "loop"), null, "~16 m is junction noise, allowed");
+
+  assert.equal(gateFailure(path([seg({ roadClass: "trunk" })]), "loop"), "freeway");
+
+  // Out one way, back a parallel one ~30 m over: just beyond the same-road reach.
+  const thin = path([seg()], { distanceMi: 2, roundness: 0.06, roadClassMix: { residential: 1 } });
+  assert.equal(gateFailure(thin, "loop"), "hairpin");
+  assert.equal(gateFailure(thin, "out_and_back"), null);
 });
 
 test("freeway segments disqualify outright", () => {
@@ -162,8 +175,8 @@ test("freeway segments disqualify outright", () => {
 });
 
 test("elevation never influences the score", () => {
-  const flat = scoreRoute(path([seg()], { elevationGainFt: 0 }), 0.2);
-  const hilly = scoreRoute(path([seg()], { elevationGainFt: 900 }), 0.2);
+  const flat = scoreRoute(path([seg()], { elevationGainFt: 0 }), 0.2, "loop");
+  const hilly = scoreRoute(path([seg()], { elevationGainFt: 900 }), 0.2, "loop");
   assert.equal(flat.score, hilly.score);
 });
 

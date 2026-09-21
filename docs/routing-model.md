@@ -29,6 +29,16 @@ The `footway == SIDEWALK` boost stays. It is not a sidewalk feature — it just
 keeps the router on a separately-drawn walkway rather than the carriageway
 beside it, where such a walkway exists. It costs nothing where none does.
 
+## Service roads are discouraged
+
+`road_class == SERVICE` is multiplied by 0.3. OSM tags parking-lot aisles as
+service roads, and loops were circling shopping-centre car parks (a Costco).
+The scorer also rejects loops over 10% service road, but discouraging them here
+means the router spends its attempts on loops that can pass.
+
+Changing this file requires deleting `routing/graph-cache/` and restarting:
+GraphHopper refuses to start with "Profiles do not match" otherwise.
+
 ## Freeway exclusion runs three times
 
 1. `import.osm.ignored_highways: motorway,trunk` drops them at import.
