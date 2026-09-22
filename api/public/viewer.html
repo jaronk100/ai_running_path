@@ -16,6 +16,10 @@
     --danger: #c0362c;
   }
   * { box-sizing: border-box; }
+  /* Must outrank the author display rules below. A plain [hidden] loses to
+     `label { display: grid }`, which left the "max distance to loop start"
+     field on screen for out-and-back even with hidden set. */
+  [hidden] { display: none !important; }
   html, body { margin: 0; height: 100%; }
   body {
     font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -40,6 +44,11 @@
   }
   input:focus, select:focus { outline: 2px solid color-mix(in srgb, var(--accent) 35%, transparent); border-color: var(--accent); }
   .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  /* Greyed rather than removed, so the form does not jump and it stays clear
+     that the setting exists but does not apply to an out-and-back. */
+  .not-applicable { opacity: .45; }
+  .not-applicable input { background: #f2f3f5; cursor: not-allowed; }
+  .why-off { font-weight: 500; text-transform: none; }
   button {
     font: inherit; font-weight: 600; cursor: pointer;
     padding: 9px 12px; border-radius: 7px; border: 1px solid var(--accent);
@@ -118,7 +127,7 @@
           </select>
         </label>
       </div>
-      <label id="approachField">Max distance to loop start (mi)
+      <label id="approachField">Max distance to loop start (mi)<span class="why-off" id="approachNote"></span>
         <input name="maxApproachMi" type="number" step="0.1" min="0" max="5" value="0.4">
       </label>
       <button type="submit" id="submit">Find routes</button>
@@ -176,8 +185,58 @@
     next: document.getElementById("next"),
     approachField: document.getElementById("approachField"),
     suggestions: document.getElementById("suggestions"),
+    approachNote: document.getElementById("approachNote"),
     map: document.getElementById("map"),
   };
+
+  const SERVER = "http://localhost:8080";
+
+  /**
+   * The page has to be served by the API. Opened straight off disk, every
+   * relative URL breaks with "Failed to parse URL from /search", which tells
+   * a user nothing.
+   */
+  const servedByApi = () =>
+    location.protocol === "http:" || location.protocol === "https:";
+
+  /** Turn a failed response into a sentence worth reading. */
+  function friendlyError(status, body) {
+    // The API sends a written explanation for the faults a user can fix.
+    if (typeof body.detail === "string" && body.detail) return body.detail;
+    const byCode = {
+      geocode_failed: "That address could not be found. Try a full street address, or a place name.",
+      outside_map_area: "That address is outside the map area loaded on the server.",
+      invalid_request: "Something in the form is not valid. Check the address and distance.",
+      search_failed: "The server could not finish the search. Check the two server windows for errors.",
+    };
+    return (
+      byCode[body.error] ??
+      `The server returned an unexpected error (${status}). Check the two server windows.`
+    );
+  }
+
+  async function postSearch(payload) {
+    if (!servedByApi()) {
+      throw new Error(
+        `This page has to be opened from the running app, at ${SERVER}/viewer. Opened as a file it cannot reach the server.`,
+      );
+    }
+    let res;
+    try {
+      res = await fetch(new URL("/search", location.origin), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    } catch {
+      throw new Error(
+        `Cannot reach the RunPath server at ${location.origin}. Make sure both server windows are open — run start.cmd to start them.`,
+      );
+    }
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(friendlyError(res.status, body));
+    return body;
+  }
 
   const state = { request: null, page: 1, candidates: [], home: null, selected: 0, lines: [] };
 
@@ -214,10 +273,21 @@
   }
 
   function syncApproachField() {
-    els.approachField.hidden = els.form.pathType.value === "out_and_back";
+    // An out-and-back starts at the door, so there is no walk to a loop start.
+    const outAndBack = els.form.pathType.value === "out_and_back";
+    els.approachField.classList.toggle("not-applicable", outAndBack);
+    els.form.maxApproachMi.disabled = outAndBack;
+    els.approachNote.textContent = outAndBack ? " — loops only" : "";
   }
   els.form.pathType.addEventListener("change", syncApproachField);
   syncApproachField();
+
+  // Say so up front rather than after a failed search.
+  if (!servedByApi()) {
+    setStatus(`Open this page at ${SERVER}/viewer — it cannot reach the server when opened as a file.`, true);
+    els.submit.disabled = true;
+    els.map.classList.add("stale");
+  }
 
   function readForm() {
     const f = els.form;
@@ -247,16 +317,7 @@
     setStatus("Searching…");
     const t0 = performance.now();
     try {
-      const res = await fetch("/search", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ...state.request, page: state.page }),
-      });
-      const body = await res.json();
-      if (!res.ok) {
-        const detail = typeof body.detail === "string" ? body.detail : body.error;
-        throw new Error(detail || `Request failed (${res.status})`);
-      }
+      const body = await postSearch({ ...state.request, page: state.page });
       state.candidates = body.candidates;
       state.home = body.home;
       state.selected = 0;

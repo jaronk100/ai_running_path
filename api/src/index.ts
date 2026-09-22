@@ -6,6 +6,62 @@ import { config } from "./config.js";
 import { googleMapsUrl, toGpx, totalRunMiles } from "./export.js";
 import * as gh from "./graphhopper.js";
 
+/** Form-field names as a person would read them back. */
+const FIELD_LABELS: Record<string, string> = {
+  address: "Start address",
+  distanceMi: "Distance",
+  pathType: "Path type",
+  maxApproachMi: "Max distance to loop start",
+  page: "Page",
+  name: "Route name",
+  coordinates: "Route",
+  approachMi: "Approach distance",
+  loopMi: "Loop distance",
+  laps: "Laps",
+};
+
+/**
+ * Validation failures as a sentence someone can act on. Returning the raw
+ * issue list meant the UI could only say "invalid_request", which names the
+ * category of problem and nothing about the problem.
+ */
+function describeIssues(error: z.ZodError): string {
+  const parts: string[] = [];
+  for (const issue of error.issues) {
+    const key = String(issue.path[0] ?? "");
+    const label = FIELD_LABELS[key] ?? key ?? "Request";
+    let text: string;
+
+    switch (issue.code) {
+      case "invalid_type":
+        text =
+          issue.received === "undefined"
+            ? `${label} is required.`
+            : `${label} must be a ${issue.expected}.`;
+        break;
+      case "too_small":
+        text =
+          issue.type === "string"
+            ? `${label} must be at least ${issue.minimum} characters.`
+            : `${label} must be ${issue.inclusive ? "at least" : "greater than"} ${issue.minimum}.`;
+        break;
+      case "too_big":
+        text =
+          issue.type === "string"
+            ? `${label} must be at most ${issue.maximum} characters.`
+            : `${label} must be ${issue.inclusive ? "at most" : "less than"} ${issue.maximum}.`;
+        break;
+      case "invalid_enum_value":
+        text = `${label} must be one of: ${issue.options.join(", ")}.`;
+        break;
+      default:
+        text = `${label} is not valid.`;
+    }
+    if (!parts.includes(text)) parts.push(text);
+  }
+  return parts.join(" ") || "The request was not valid.";
+}
+
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
@@ -45,7 +101,7 @@ app.get("/health", async (_req, res) => {
 app.post("/search", async (req, res) => {
   const parsed = searchSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: "invalid_request", detail: parsed.error.issues });
+    res.status(400).json({ error: "invalid_request", detail: describeIssues(parsed.error) });
     return;
   }
 
@@ -88,7 +144,7 @@ const gpxSchema = z.object({
 app.post("/export/gpx", (req, res) => {
   const parsed = gpxSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: "invalid_request", detail: parsed.error.issues });
+    res.status(400).json({ error: "invalid_request", detail: describeIssues(parsed.error) });
     return;
   }
   const gpx = toGpx(parsed.data.coordinates, parsed.data.name);
@@ -105,7 +161,7 @@ const totalSchema = z.object({
 app.post("/total", (req, res) => {
   const parsed = totalSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: "invalid_request", detail: parsed.error.issues });
+    res.status(400).json({ error: "invalid_request", detail: describeIssues(parsed.error) });
     return;
   }
   const { approachMi, loopMi, laps } = parsed.data;
