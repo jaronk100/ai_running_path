@@ -8,6 +8,7 @@ import {
   gateFailure,
   isDisqualified,
   quietness,
+  ruleBreaks,
   scoreRoute,
   distanceFit,
   withinDistance,
@@ -259,4 +260,22 @@ test("being over the distance is no worse than being under", () => {
   assert.ok(at(2.0) > at(2.15));
   assert.equal(at(2.1), at(1.9));
   assert.ok(at(2.05) > at(1.9), "closer wins even when it is the longer one");
+});
+
+test("a route that breaks several rules reports all of them", () => {
+  // Reporting only the first made one rule look like the whole problem: at
+  // 2000 Crystal Falls Pkwy the tally blamed the arterial limit, but raising
+  // that limit to 35% admitted nothing, because the same loops also doubled
+  // back and circled a lot.
+  const bad = path([seg()], {
+    distanceMi: 2,
+    retracePct: 0.05,
+    roundness: 0.5,
+    roadClassMix: { primary: 0.3, service: 0.3, residential: 0.4 },
+  });
+  assert.deepEqual(ruleBreaks(bad, "loop"), ["major roads", "doubles back", "parking lots"]);
+  assert.equal(gateFailure(bad, "loop"), "major roads", "still reports a first reason");
+
+  const clean = path([seg()], { distanceMi: 2, roadClassMix: { residential: 1 } });
+  assert.deepEqual(ruleBreaks(clean, "loop"), []);
 });

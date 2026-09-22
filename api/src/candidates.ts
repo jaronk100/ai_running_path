@@ -6,7 +6,7 @@ import * as gh from "./graphhopper.js";
 import { loopForSeed, startNearest } from "./loops.js";
 import { geocode } from "./geocode.js";
 import { pMap } from "./pmap.js";
-import { gateFailure, scoreRoute, withinDistance } from "./scoring.js";
+import { gateFailure, ruleBreaks, scoreRoute, withinDistance } from "./scoring.js";
 import type { GHPath, LatLng, RouteCandidate, SearchRequest } from "./types.js";
 
 const GH_CONCURRENCY = 6;
@@ -105,20 +105,28 @@ function suggest(
     );
   }
 
-  const worst = Object.entries(rejected).sort((a, b) => b[1] - a[1])[0];
-  if (worst) {
-    const [reason, n] = worst;
+  const ranked = Object.entries(rejected).sort((a, b) => b[1] - a[1]);
+  if (ranked.length) {
     const arterialPct = Math.round(config.gates.maxMajorRoadShare * 100);
-    const explain: Record<string, string> = {
-      "doubles back": `${n} were the right distance but reused a street. How the streets connect limits which loop sizes are possible.`,
-      "major roads": `${n} were the right distance but spent more than ${arterialPct}% on an arterial road.`,
-      "parking lots": `${n} were the right distance but circled a parking lot.`,
-      hairpin: `${n} were the right distance but ran out one way and back along a parallel road.`,
-      "loop starts too far away": `${n} loops were found, but they start more than ${maxApproachMi} mi from the address.`,
-      freeway: `${n} were the right distance but used a freeway.`,
+    const phrase: Record<string, string> = {
+      "doubles back": "reused a street",
+      "major roads": `spent over ${arterialPct}% on an arterial`,
+      "parking lots": "circled a parking lot",
+      hairpin: "ran out and back along a parallel road",
+      freeway: "used a freeway",
+      "loop starts too far away": `started more than ${maxApproachMi} mi away`,
     };
-    const line = explain[reason];
-    if (line) out.push(line);
+    // Routes usually break several rules at once, so report every reason that
+    // is anywhere near the top. Naming only the commonest one invites relaxing
+    // that single limit, which then admits nothing.
+    const top = ranked.filter(([, n]) => n >= ranked[0]![1] * 0.5);
+    const parts = top.map(([reason, n]) => `${phrase[reason] ?? reason} (${n})`);
+    out.push(
+      `Right-length routes were excluded because they ${parts.join(", ")}.` +
+        (top.length > 1
+          ? " Most broke more than one rule, so easing any single one may not help."
+          : ""),
+    );
   }
 
   if (req.pathType === "loop" && maxApproachMi < config.search.maxApproachCapMi) {
@@ -153,11 +161,11 @@ async function findLoops(
   const found = await pMap(budgeted, GH_CONCURRENCY, (job) =>
     loopForSeed(job.point, req.distanceMi, job.seed, (loop, matchesDistance) => {
       const enriched = enrichPath(loop);
-      const failure = gateFailure(enriched, "loop");
-      if (failure) {
-        // Only count rule breaks against routes that were the right distance;
-        // otherwise every near miss would inflate the tally.
-        if (matchesDistance) reject(failure);
+      const breaks = ruleBreaks(enriched, "loop");
+      if (breaks.length) {
+        // Count every rule a route breaks, but only for routes that were the
+        // right distance; near misses would otherwise inflate the tally.
+        if (matchesDistance) breaks.forEach(reject);
         return null;
       }
       if (!matchesDistance) noteNearMiss(enriched.metrics.distanceMi);
@@ -278,9 +286,9 @@ async function findOutAndBacks(
   for (const leg of legs) {
     if (!leg) continue;
     const enriched = enrichPath(leg);
-    const failure = gateFailure(enriched, "out_and_back");
-    if (failure) {
-      reject(failure);
+    const breaks = ruleBreaks(enriched, "out_and_back");
+    if (breaks.length) {
+      breaks.forEach(reject);
       continue;
     }
 

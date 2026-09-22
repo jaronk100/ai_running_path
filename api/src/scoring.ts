@@ -135,22 +135,37 @@ export function majorRoadShare(path: EnrichedPath): number {
 }
 
 /**
- * The first hard rule a route breaks, or null if it may be shown. For a loop,
- * `path` is the loop proper -- the stem has already been cut away as approach.
+ * Every hard rule a route breaks -- all of them, not just the first.
+ *
+ * Reporting only the first made one rule look like the whole reason a search
+ * came back empty. At 2000 Crystal Falls Pkwy that read as "10 loops exceeded
+ * the arterial limit", yet raising that limit to 35% admitted nothing, because
+ * the same loops were failing two or three other rules as well.
+ *
+ * For a loop, `path` is the loop proper -- the stem has already been cut away
+ * as approach.
  */
-export function gateFailure(path: EnrichedPath, pathType: PathType): string | null {
+export function ruleBreaks(path: EnrichedPath, pathType: PathType): string[] {
   const g = config.gates;
-  if (isDisqualified(path)) return "freeway";
-  if (majorRoadShare(path) > g.maxMajorRoadShare) return "major roads";
+  const breaks: string[] = [];
+
+  if (isDisqualified(path)) breaks.push("freeway");
+  if (majorRoadShare(path) > g.maxMajorRoadShare) breaks.push("major roads");
+
   if (pathType === "loop") {
     const doubledM = path.metrics.retracePct * path.metrics.distanceMi * MI_TO_M;
-    if (doubledM > g.maxLoopDoubleBackM) return "doubles back";
+    if (doubledM > g.maxLoopDoubleBackM) breaks.push("doubles back");
     if ((path.metrics.roadClassMix["service"] ?? 0) > g.maxLoopServiceShare) {
-      return "parking lots";
+      breaks.push("parking lots");
     }
-    if (path.metrics.roundness < g.minLoopRoundness) return "hairpin";
+    if (path.metrics.roundness < g.minLoopRoundness) breaks.push("hairpin");
   }
-  return null;
+  return breaks;
+}
+
+/** The first rule a route breaks, or null if it may be shown. */
+export function gateFailure(path: EnrichedPath, pathType: PathType): string | null {
+  return ruleBreaks(path, pathType)[0] ?? null;
 }
 
 export interface ScoreResult {
