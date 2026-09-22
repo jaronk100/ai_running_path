@@ -21,16 +21,37 @@ import type { PathType } from "./types.js";
  * one street and down the next. Out-and-backs take full marks here; they only
  * ever compete with each other.
  *
- * Requested distance is NOT a weight. It is a hard gate (+/- 0.1 mi) applied
- * during generation, so everything here is already the right length.
+ * Distance is both a gate and a term: a route must land within +/-10% of the
+ * request, and among those the closest to it ranks higher, over or under alike.
  *
  * Elevation is deliberately absent. The spec says report it, never rank on it.
  */
 export const WEIGHTS = {
-  approach: 55,
-  traffic: 30,
+  approach: 45,
+  distance: 20,
+  traffic: 20,
   shape: 15,
 } as const;
+
+/** Half-width of the accepted distance band, in miles. */
+export function toleranceMi(targetMi: number): number {
+  return targetMi * config.search.distanceTolerancePct;
+}
+
+export function withinDistance(actualMi: number, targetMi: number): boolean {
+  // The epsilon matters at the boundary: |2.2 - 2| computes as 0.2000000000000002.
+  return Math.abs(actualMi - targetMi) <= toleranceMi(targetMi) + 1e-9;
+}
+
+/**
+ * 1 at exactly the requested distance, 0 at the edge of the band. Symmetric on
+ * purpose: 10% over is no worse than 10% under, it is simply further from what
+ * was asked for.
+ */
+export function distanceFit(actualMi: number, targetMi: number): number {
+  const tol = toleranceMi(targetMi);
+  return tol > 0 ? clamp01(1 - Math.abs(actualMi - targetMi) / tol) : 0;
+}
 
 /** Roundness at or above this scores full marks: roughly a 3:1 rectangle, which
  *  street grids rarely beat once their zigzags inflate the perimeter. */
@@ -141,6 +162,7 @@ export function scoreRoute(
   path: EnrichedPath,
   approachMi: number,
   pathType: PathType,
+  targetMi: number,
 ): ScoreResult {
   const approach = approachScore(approachMi);
 
@@ -157,10 +179,12 @@ export function scoreRoute(
 
   const breakdown = {
     approach: approach * WEIGHTS.approach,
+    distance: distanceFit(path.metrics.distanceMi, targetMi) * WEIGHTS.distance,
     traffic: traffic * WEIGHTS.traffic,
     shape: shape * WEIGHTS.shape,
   };
 
-  const score = breakdown.approach + breakdown.traffic + breakdown.shape;
+  const score =
+    breakdown.approach + breakdown.distance + breakdown.traffic + breakdown.shape;
   return { score: Math.round(score * 10) / 10, breakdown };
 }

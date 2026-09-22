@@ -104,5 +104,11 @@ and the `2A + (N x L)` math. They run without GraphHopper.
 - **The Google Maps link is approximate by construction.** Google's URL scheme
   caps at 9 waypoints, so it re-routes between a skeleton of the route. GPX is
   the faithful export.
-- **Geocoding is US Census.** Free and keyless, good on street addresses, poor
-  on place names ("Cedar Park library" will not resolve; its street address will).
+- **Geocoding leans on Nominatim, whose usage policy allows 1 request/second.**
+  Requests are queued and cached to respect that, which is fine for testing but
+  will not carry real traffic. Before launch, self-host Nominatim or Photon, or
+  pay for a geocoder; the swap is confined to `api/src/geocode.ts`.
+- **Geocoders disagree, and are sometimes confidently wrong.** Answers are now
+  checked against the query, so a bad one is reported as "could not find"
+  rather than quietly moving the search 2 miles. The cost is that an unusual
+  but correct answer can be rejected too.

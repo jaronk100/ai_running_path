@@ -2,6 +2,7 @@ import { config } from "./config.js";
 import { perSegment } from "./enrich.js";
 import { MI_TO_M, haversineMeters, segmentLengths } from "./geo.js";
 import * as gh from "./graphhopper.js";
+import { toleranceMi } from "./scoring.js";
 import { splitLollipop } from "./shape.js";
 import type { DetailInterval, GHPath, LatLng } from "./types.js";
 
@@ -188,19 +189,29 @@ export interface FoundLoop<T> {
 }
 
 /**
+ * How far outside the accepted band a loop is still worth showing to
+ * `inspect`, as a multiple of the band. These near misses are what let a search
+ * that finds nothing say which loop lengths do exist nearby.
+ */
+const NEAR_MISS_BAND = 2.5;
+
+/**
  * One loop for this seed whose loop proper lands in the distance tolerance and
- * that `judge` accepts, or null. `judge` returns null to reject.
+ * that `inspect` accepts, or null.
  *
- * A loop of the right length that `judge` rejects ends the seed: rescaling by
- * ~1.0 would only reproduce it, and other seeds are the source of other shapes.
+ * `inspect` is called for every clean loop near the requested distance, told
+ * whether this one is actually within tolerance, and returns null to reject.
+ * A loop of the right length that it rejects ends the seed: rescaling by ~1.0
+ * would only reproduce it, and other seeds are the source of other shapes.
  */
 export async function loopForSeed<T>(
   start: LatLng,
   targetMi: number,
   seed: number,
-  judge: (loop: GHPath) => T | null,
+  inspect: (loop: GHPath, matchesDistance: boolean) => T | null,
 ): Promise<FoundLoop<T> | null> {
   const targetM = targetMi * MI_TO_M;
+  const tolMi = toleranceMi(targetMi);
   const minReq = targetM * 0.15;
   const maxReq = targetM * 1.8;
   let request = targetM * FIRST_SCALE;
@@ -222,11 +233,16 @@ export async function loopForSeed<T>(
     if (split) {
       const loop = slicePath(path, split.startPoint, split.endPoint);
       measuredM = loop.distance;
-      if (Math.abs(loop.distance - targetM) / MI_TO_M <= config.search.distanceToleranceMi) {
-        const judged = judge(loop);
-        if (judged === null) return null;
-        const [lon, lat] = coords[split.startPoint]!;
-        return { loop, junction: { lon, lat }, judged };
+
+      const errorMi = Math.abs(loop.distance - targetM) / MI_TO_M;
+      if (errorMi <= tolMi * NEAR_MISS_BAND) {
+        const matchesDistance = errorMi <= tolMi;
+        const judged = inspect(loop, matchesDistance);
+        if (matchesDistance) {
+          if (judged === null) return null;
+          const [lon, lat] = coords[split.startPoint]!;
+          return { loop, junction: { lon, lat }, judged };
+        }
       }
     }
 

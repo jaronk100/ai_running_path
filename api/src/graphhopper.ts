@@ -87,6 +87,34 @@ export async function route(points: LatLng[]): Promise<GHPath | null> {
   }
 }
 
+let boundsCache: [number, number, number, number] | null = null;
+
+/** The loaded graph's extent as [minLon, minLat, maxLon, maxLat], from /info. */
+export async function graphBounds(): Promise<[number, number, number, number] | null> {
+  if (boundsCache) return boundsCache;
+  try {
+    const res = await fetch(`${config.graphhopperUrl}/info`);
+    if (!res.ok) return null;
+    const json = (await res.json()) as { bbox?: number[] };
+    if (json.bbox?.length === 4) boundsCache = json.bbox as [number, number, number, number];
+    return boundsCache;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Is this point on the loaded map at all? An address outside it routes to
+ * nothing, which would otherwise look like "no routes match your rules"
+ * rather than "that is off the edge of the map you loaded".
+ */
+export async function isInsideGraph(p: LatLng): Promise<boolean> {
+  const b = await graphBounds();
+  if (!b) return true; // cannot tell; let the search speak for itself
+  const [minLon, minLat, maxLon, maxLat] = b;
+  return p.lon >= minLon && p.lon <= maxLon && p.lat >= minLat && p.lat <= maxLat;
+}
+
 export async function health(): Promise<boolean> {
   try {
     const res = await fetch(`${config.graphhopperUrl}/health`);

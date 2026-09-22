@@ -5,13 +5,28 @@ export const config = {
   graphhopperUrl: process.env.GRAPHHOPPER_URL ?? "http://localhost:8989",
   profile: "running",
 
-  /** US Census geocoder: free, no key, US-only, good on street addresses. */
+  /** Sent to every third-party service. Overpass and Nominatim both require a
+   *  real one; Node's default gets a 406 from Overpass and is against
+   *  Nominatim's usage policy. */
+  userAgent: "RunPath/0.1 (running route planner)",
+
+  /** OSM geocoder: knows place names and newer addresses, and returns a
+   *  structured address that can be checked against the query. Usage policy
+   *  caps this at 1 request/second -- see geocode.ts. */
+  nominatimUrl: "https://nominatim.openstreetmap.org/search",
+
+  /** US Census geocoder, the fallback: street addresses only, and it will
+   *  answer the wrong street rather than nothing, so its answers are checked. */
   censusGeocodeUrl:
     "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress",
 
   search: {
-    /** Hard gate from the spec: a route is only a match within this band. */
-    distanceToleranceMi: 0.1,
+    /**
+     * A route counts as the requested distance within this fraction of it:
+     * +/-0.2 mi on a 2 mi loop, +/-0.5 mi on a 5 mi one. Being over is no worse
+     * than being under -- the ranking simply prefers whichever is closest.
+     */
+    distanceTolerancePct: 0.1,
     /** Furthest a loop start may sit from home. Most runners want far less. */
     maxApproachCapMi: 5,
     /** Candidate loop start points sampled around the home point. */

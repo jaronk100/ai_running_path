@@ -75,7 +75,16 @@
   .more button { width: 100%; }
   .empty { color: var(--muted); padding: 16px 8px; font-size: 13px; }
 
-  #map { height: 100%; }
+  #suggestions { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 4px; }
+  #suggestions li {
+    font-size: 12px; color: var(--ink); background: #fff8e6;
+    border: 1px solid #f0dca8; border-radius: 6px; padding: 6px 8px;
+  }
+
+  #map { height: 100%; transition: filter .15s, opacity .15s; }
+  /* Greyed out when the address could not be found: the map no longer shows
+     anything that answers the question that was asked. */
+  #map.stale { filter: grayscale(1); opacity: .4; }
   .legend {
     background: #fff; padding: 7px 10px; border-radius: 7px; font-size: 12px;
     box-shadow: 0 1px 4px rgba(0,0,0,.18); line-height: 1.6;
@@ -114,6 +123,7 @@
       </label>
       <button type="submit" id="submit">Find routes</button>
       <div id="status" role="status" aria-live="polite"></div>
+      <ul id="suggestions"></ul>
     </form>
     <ol id="results"><li class="empty">Enter an address and search. Routes draw on the map; click one to zoom in.</li></ol>
     <div class="more"><button type="button" class="secondary" id="next" hidden>Next 5 routes</button></div>
@@ -165,6 +175,8 @@
     results: document.getElementById("results"),
     next: document.getElementById("next"),
     approachField: document.getElementById("approachField"),
+    suggestions: document.getElementById("suggestions"),
+    map: document.getElementById("map"),
   };
 
   const state = { request: null, page: 1, candidates: [], home: null, selected: 0, lines: [] };
@@ -176,6 +188,29 @@
   function setStatus(text, isError = false) {
     els.status.textContent = text;
     els.status.classList.toggle("error", isError);
+  }
+
+  function renderSuggestions(lines) {
+    els.suggestions.replaceChildren();
+    for (const line of lines ?? []) {
+      const li = document.createElement("li");
+      li.textContent = line;
+      els.suggestions.append(li);
+    }
+  }
+
+  /**
+   * Drop every route from the map and the list. Used when a search fails: the
+   * previous results answered a different address, and leaving them on screen
+   * beside an error reads as though they still apply.
+   */
+  function clearRoutes() {
+    state.candidates = [];
+    state.lines = [];
+    state.home = null;
+    layers.clearLayers();
+    els.results.replaceChildren();
+    els.next.hidden = true;
   }
 
   function syncApproachField() {
@@ -229,21 +264,28 @@
       const secs = ((performance.now() - t0) / 1000).toFixed(1);
       const first = (state.page - 1) * PAGE_SIZE + 1;
       const last = first + body.candidates.length - 1;
-      // Say why a search came back thin: right-length routes that broke a rule.
+      // When some routes came back, say what was excluded so a thin result
+      // explains itself. When none did, the suggestions below say it better.
       const rejected = Object.entries(body.rejected ?? {})
         .sort((a, b) => b[1] - a[1])
         .map(([reason, n]) => `${n} ${reason}`)
         .join(", ");
-      const why = rejected ? ` Right length but excluded: ${rejected}.` : "";
+      const target = Number(state.request.distanceMi);
       setStatus(
         body.totalFound === 0
-          ? `No routes matched within ±0.1 mi (${secs}s).${why}`
-          : `${body.totalFound} routes found in ${secs}s · showing ${first}–${last}.${why}`,
+          ? `No routes within 10% of ${target} mi (${secs}s).`
+          : `${body.totalFound} routes found in ${secs}s · showing ${first}–${last}.` +
+            (rejected ? ` Excluded: ${rejected}.` : ""),
       );
       els.next.hidden = state.page * PAGE_SIZE >= body.totalFound;
+      els.map.classList.remove("stale");
+      renderSuggestions(body.suggestions);
       render();
       fitAll();
     } catch (err) {
+      clearRoutes();
+      els.map.classList.add("stale");
+      renderSuggestions([]);
       setStatus(err.message, true);
     } finally {
       els.submit.disabled = false;

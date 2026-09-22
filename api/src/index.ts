@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url";
 import express from "express";
 import { z } from "zod";
-import { findRoutes } from "./candidates.js";
+import { GeocodeFailed, OutsideMapArea, findRoutes } from "./candidates.js";
 import { config } from "./config.js";
 import { googleMapsUrl, toGpx, totalRunMiles } from "./export.js";
 import * as gh from "./graphhopper.js";
@@ -15,6 +15,9 @@ app.use(express.json({ limit: "2mb" }));
 app.use(
   express.static(fileURLToPath(new URL("../public", import.meta.url)), {
     extensions: ["html"],
+    // Revalidate every load. Without this a browser can sit on a cached copy
+    // of the viewer for days and appear to be missing changes that shipped.
+    setHeaders: (res) => res.setHeader("Cache-Control", "no-cache"),
   }),
 );
 
@@ -62,8 +65,14 @@ app.post("/search", async (req, res) => {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown error";
-    if (message.startsWith("Could not geocode")) {
+    // These two are the user's problem to fix, not a server fault, and the UI
+    // shows the detail verbatim -- so they carry a sentence worth reading.
+    if (err instanceof GeocodeFailed) {
       res.status(422).json({ error: "geocode_failed", detail: message });
+      return;
+    }
+    if (err instanceof OutsideMapArea) {
+      res.status(422).json({ error: "outside_map_area", detail: message });
       return;
     }
     console.error("[search] failed:", err);

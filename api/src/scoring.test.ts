@@ -9,6 +9,8 @@ import {
   isDisqualified,
   quietness,
   scoreRoute,
+  distanceFit,
+  withinDistance,
 } from "./scoring.js";
 import type { GHPath, RouteMetrics } from "./types.js";
 
@@ -72,18 +74,19 @@ test("approach score decays monotonically and is uncapped", () => {
 
 test("approach dominates ranking, per the spec", () => {
   // An all-trail loop far away vs an ordinary residential loop at the door.
-  const far = scoreRoute(path([trail()]), 0.9, "loop");
-  const near = scoreRoute(path([seg()]), 0.05, "loop");
+  const far = scoreRoute(path([trail()]), 0.9, "loop", 2);
+  const near = scoreRoute(path([seg()]), 0.05, "loop", 2);
   assert.ok(
     near.score > far.score,
     `near residential (${near.score}) should beat far trail (${far.score})`,
   );
 });
 
-test("approach carries the largest weight of the three terms", () => {
-  const best = scoreRoute(path([trail()]), 0, "loop");
+test("approach carries the largest weight of the four terms", () => {
+  const best = scoreRoute(path([trail()]), 0, "loop", 2);
   assert.ok(best.breakdown["approach"]! > best.breakdown["traffic"]!);
   assert.ok(best.breakdown["approach"]! > best.breakdown["shape"]!);
+  assert.ok(best.breakdown["approach"]! > best.breakdown["distance"]!);
   assert.equal(best.score, 100);
 });
 
@@ -116,28 +119,28 @@ test("a path is not penalised for lacking a posted speed", () => {
 });
 
 test("major-road crossings lower the traffic term", () => {
-  const none = scoreRoute(path([seg()], { crossingsOfMajorRoads: 0 }), 0, "loop");
-  const many = scoreRoute(path([seg()], { crossingsOfMajorRoads: 3 }), 0, "loop");
+  const none = scoreRoute(path([seg()], { crossingsOfMajorRoads: 0 }), 0, "loop", 2);
+  const many = scoreRoute(path([seg()], { crossingsOfMajorRoads: 3 }), 0, "loop", 2);
   assert.ok(many.breakdown["traffic"]! < none.breakdown["traffic"]!);
 });
 
 test("more trail and less arterial scores higher", () => {
-  const trailHeavy = scoreRoute(path([trail(), trail(), seg()]), 0, "loop");
+  const trailHeavy = scoreRoute(path([trail(), trail(), seg()]), 0, "loop", 2);
   const roadHeavy = scoreRoute(
     path([seg({ roadClass: "tertiary", maxSpeed: 40 }), seg(), seg()]),
-    0, "loop");
+    0, "loop", 2);
   assert.ok(trailHeavy.score > roadHeavy.score);
 });
 
 test("a rounder loop scores higher on shape", () => {
-  const round = scoreRoute(path([seg()], { roundness: 0.65 }), 0, "loop");
-  const hairpin = scoreRoute(path([seg()], { roundness: 0.1 }), 0, "loop");
+  const round = scoreRoute(path([seg()], { roundness: 0.65 }), 0, "loop", 2);
+  const hairpin = scoreRoute(path([seg()], { roundness: 0.1 }), 0, "loop", 2);
   assert.ok(hairpin.breakdown["shape"]! < round.breakdown["shape"]!);
   assert.ok(hairpin.score < round.score);
 });
 
 test("out-and-backs are not marked down for not being round", () => {
-  const ob = scoreRoute(path([seg()], { roundness: 0 }), 0, "out_and_back");
+  const ob = scoreRoute(path([seg()], { roundness: 0 }), 0, "out_and_back", 2);
   assert.equal(ob.breakdown["shape"], 15);
 });
 
@@ -175,8 +178,8 @@ test("freeway segments disqualify outright", () => {
 });
 
 test("elevation never influences the score", () => {
-  const flat = scoreRoute(path([seg()], { elevationGainFt: 0 }), 0.2, "loop");
-  const hilly = scoreRoute(path([seg()], { elevationGainFt: 900 }), 0.2, "loop");
+  const flat = scoreRoute(path([seg()], { elevationGainFt: 0 }), 0.2, "loop", 2);
+  const hilly = scoreRoute(path([seg()], { elevationGainFt: 900 }), 0.2, "loop", 2);
   assert.equal(flat.score, hilly.score);
 });
 
@@ -234,4 +237,26 @@ test("a signalised crossing counts as a busy crossing, once per intersection", (
     },
   };
   assert.equal(enrichPath(gh).metrics.crossingsOfMajorRoads, 2);
+});
+
+test("the distance band is 10% of what was asked for", () => {
+  assert.ok(withinDistance(2.2, 2), "2.2 mi answers a 2 mi request");
+  assert.ok(withinDistance(1.8, 2));
+  assert.ok(!withinDistance(2.3, 2));
+  // The band scales, so a 5 mi request accepts +/-0.5 mi.
+  assert.ok(withinDistance(5.45, 5));
+  assert.ok(!withinDistance(5.6, 5));
+});
+
+test("being over the distance is no worse than being under", () => {
+  assert.equal(distanceFit(2, 2), 1);
+  assert.equal(distanceFit(2.1, 2), distanceFit(1.9, 2));
+  assert.equal(distanceFit(2.2, 2), 0, "the edge of the band scores zero");
+
+  // Ranking follows: same route quality, closer distance wins; over and under
+  // at equal error tie.
+  const at = (mi: number) => scoreRoute(path([seg()], { distanceMi: mi }), 0, "loop", 2).score;
+  assert.ok(at(2.0) > at(2.15));
+  assert.equal(at(2.1), at(1.9));
+  assert.ok(at(2.05) > at(1.9), "closer wins even when it is the longer one");
 });

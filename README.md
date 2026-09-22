@@ -24,7 +24,7 @@ A route breaking any of these is dropped, never merely ranked lower
 
 | Rule | Applies to | Detail |
 |---|---|---|
-| Distance within +/- 0.1 mi | both | For a loop, measured on the loop proper, excluding the walk to it. |
+| Distance within 10% of the request | both | +/-0.2 mi on a 2 mi route. For a loop, measured on the loop proper, excluding the walk to it. |
 | No freeways | both | Motorway/trunk, excluded three separate ways. |
 | No running along major roads | both | Primary/secondary at most 10% of the route: enough to cross or connect. |
 | Never doubles back | loops | No stretch covered again in the opposite direction within 25 m, so the far sidewalk counts. 30 m allowed for junction noise. |
@@ -37,8 +37,9 @@ Among routes that pass, three terms (`api/src/scoring.ts`):
 
 | Term | Weight | Measures |
 |---|---|---|
-| Approach | 55 | How close the loop starts to the address. Dominant by spec. |
-| Traffic | 30 | Road class and posted speed along the route, minus busy-road crossings. |
+| Approach | 45 | How close the loop starts to the address. Dominant by spec. |
+| Distance | 20 | Closeness to the requested distance. Symmetric — over is no worse than under. |
+| Traffic | 20 | Road class and posted speed along the route, minus busy-road crossings. |
 | Shape | 15 | Roundness — a loop as imagined, not a thin one. Out-and-backs score full. |
 
 Elevation is reported, never ranked. Sidewalk and streetlight data were dropped:
@@ -89,6 +90,25 @@ neighbourhoods; a loop inside one tops out near 3 mi, and a bigger one must run
 along a major road or pass the same connector twice. So some requested
 distances have no answer under the rules — the search then says how many
 right-length routes each rule excluded.
+
+## Geocoding
+
+OSM (Nominatim) first, US Census as the fallback, and **every answer is checked
+against what was typed** before it is used.
+
+That check is not belt and braces. Census answered `1011 S Bagdad Rd, Leander`
+with `1011 BAGDAD RD`: it dropped the S, interpolated the house number onto a
+different Bagdad Road, and returned a point 2 miles from the Leander library.
+Every route was then correctly built around the wrong place, which looks exactly
+like a distance bug. A result whose house number, directional prefix or street
+name contradicts the query is now discarded — `addressMatches` in
+`api/src/geocode.ts`.
+
+Census is also address-only: it cannot find "Mason Homestead", and misses
+addresses outside its known ranges. OSM has both, so it leads.
+
+An address that geocodes but lands outside the loaded extract is reported as
+such, rather than as "no routes found".
 
 ## How the data actually flows
 

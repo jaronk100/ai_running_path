@@ -6,13 +6,18 @@ import * as gh from "./graphhopper.js";
 import { loopForSeed, startNearest } from "./loops.js";
 import { geocode } from "./geocode.js";
 import { pMap } from "./pmap.js";
-import { gateFailure, scoreRoute } from "./scoring.js";
+import { gateFailure, scoreRoute, withinDistance } from "./scoring.js";
 import type { GHPath, LatLng, RouteCandidate, SearchRequest } from "./types.js";
 
 const GH_CONCURRENCY = 6;
 
 /** A loop starting this close to the address starts at the door. */
 const AT_THE_DOOR_M = 20;
+
+/** The address could not be turned into a point at all. */
+export class GeocodeFailed extends Error {}
+/** The address is real but off the edge of the map extract that is loaded. */
+export class OutsideMapArea extends Error {}
 
 export interface SearchResult {
   home: LatLng;
@@ -24,20 +29,39 @@ export interface SearchResult {
    * a search came back thin instead of leaving the user to guess.
    */
   rejected: Record<string, number>;
+  /** Plain-language next steps when nothing was found. */
+  suggestions: string[];
 }
 
 export async function findRoutes(req: SearchRequest): Promise<SearchResult> {
   const geo = await geocode(req.address);
-  if (!geo) throw new Error(`Could not geocode address: ${req.address}`);
+  if (!geo) {
+    throw new GeocodeFailed(
+      `Could not find "${req.address}". Try a full street address, or a place name such as "Leander Public Library".`,
+    );
+  }
+  if (!(await gh.isInsideGraph(geo.point))) {
+    throw new OutsideMapArea(
+      `${geo.matchedAddress} is outside the map area loaded on the server.`,
+    );
+  }
 
   const rejected: Record<string, number> = {};
   const reject = (reason: string) => {
     rejected[reason] = (rejected[reason] ?? 0) + 1;
   };
+  // Lengths of loops that follow every rule but are not the requested distance.
+  const nearMiss: number[] = [];
+  const noteNearMiss = (mi: number) => nearMiss.push(mi);
+
+  const maxApproachMi = Math.min(
+    req.maxApproachMi ?? 0.5,
+    config.search.maxApproachCapMi,
+  );
 
   const candidates =
     req.pathType === "loop"
-      ? await findLoops(geo.point, req, reject)
+      ? await findLoops(geo.point, req, maxApproachMi, reject, noteNearMiss)
       : await findOutAndBacks(geo.point, req, reject);
 
   const deduped = dedupe(candidates);
@@ -52,7 +76,59 @@ export async function findRoutes(req: SearchRequest): Promise<SearchResult> {
     candidates: deduped.slice((page - 1) * size, page * size),
     totalFound: deduped.length,
     rejected,
+    suggestions: deduped.length
+      ? []
+      : suggest(req, maxApproachMi, rejected, nearMiss),
   };
+}
+
+/**
+ * What to tell someone whose search found nothing. The most useful thing is
+ * which loop lengths do exist here, since loops come in the sizes the street
+ * network allows rather than the size anyone asks for.
+ */
+function suggest(
+  req: SearchRequest,
+  maxApproachMi: number,
+  rejected: Record<string, number>,
+  nearMiss: number[],
+): string[] {
+  const out: string[] = [];
+
+  if (nearMiss.length) {
+    const nearest = [...new Set(nearMiss.map((mi) => Number(mi.toFixed(1))))]
+      .sort((a, b) => Math.abs(a - req.distanceMi) - Math.abs(b - req.distanceMi))
+      .slice(0, 3)
+      .sort((a, b) => a - b);
+    out.push(
+      `Routes that follow your rules exist here at ${nearest.join(", ")} mi.`,
+    );
+  }
+
+  const worst = Object.entries(rejected).sort((a, b) => b[1] - a[1])[0];
+  if (worst) {
+    const [reason, n] = worst;
+    const arterialPct = Math.round(config.gates.maxMajorRoadShare * 100);
+    const explain: Record<string, string> = {
+      "doubles back": `${n} were the right distance but reused a street. How the streets connect limits which loop sizes are possible.`,
+      "major roads": `${n} were the right distance but spent more than ${arterialPct}% on an arterial road.`,
+      "parking lots": `${n} were the right distance but circled a parking lot.`,
+      hairpin: `${n} were the right distance but ran out one way and back along a parallel road.`,
+      "loop starts too far away": `${n} loops were found, but they start more than ${maxApproachMi} mi from the address.`,
+      freeway: `${n} were the right distance but used a freeway.`,
+    };
+    const line = explain[reason];
+    if (line) out.push(line);
+  }
+
+  if (req.pathType === "loop" && maxApproachMi < config.search.maxApproachCapMi) {
+    out.push(
+      `Try raising "max distance to loop start" above ${maxApproachMi} mi, or asking for a shorter loop.`,
+    );
+  } else {
+    out.push("Try a different distance.");
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------- loops
@@ -60,12 +136,10 @@ export async function findRoutes(req: SearchRequest): Promise<SearchResult> {
 async function findLoops(
   home: LatLng,
   req: SearchRequest,
+  maxApproachMi: number,
   reject: (reason: string) => void,
+  noteNearMiss: (mi: number) => void,
 ): Promise<RouteCandidate[]> {
-  const maxApproachMi = Math.min(
-    req.maxApproachMi ?? 0.5,
-    config.search.maxApproachCapMi,
-  );
   const seeds = await seedPoints(home, maxApproachMi);
 
   const jobs: { point: LatLng; seed: number }[] = [];
@@ -77,13 +151,16 @@ async function findLoops(
   const budgeted = jobs.slice(0, config.search.maxLoopSeeds);
 
   const found = await pMap(budgeted, GH_CONCURRENCY, (job) =>
-    loopForSeed(job.point, req.distanceMi, job.seed, (loop) => {
+    loopForSeed(job.point, req.distanceMi, job.seed, (loop, matchesDistance) => {
       const enriched = enrichPath(loop);
       const failure = gateFailure(enriched, "loop");
       if (failure) {
-        reject(failure);
+        // Only count rule breaks against routes that were the right distance;
+        // otherwise every near miss would inflate the tally.
+        if (matchesDistance) reject(failure);
         return null;
       }
+      if (!matchesDistance) noteNearMiss(enriched.metrics.distanceMi);
       return enriched;
     }),
   );
@@ -114,7 +191,7 @@ async function findLoops(
   const out: RouteCandidate[] = [];
   for (const r of withApproach) {
     if (!r) continue;
-    out.push(toCandidate(r.f.judged, "loop", r.approachMi, r.approach));
+    out.push(toCandidate(r.f.judged, "loop", r.approachMi, r.approach, req.distanceMi));
   }
   return out;
 }
@@ -225,7 +302,7 @@ async function findOutAndBacks(
       },
     };
 
-    out.push(toCandidate(doubled, "out_and_back", 0, []));
+    out.push(toCandidate(doubled, "out_and_back", 0, [], req.distanceMi));
   }
   return out;
 }
@@ -254,8 +331,7 @@ async function outAndBackLeg(
       hi = crowM;
       continue;
     }
-    const errMi = Math.abs(leg.distance * 2 - totalMi * MI_TO_M) / MI_TO_M;
-    if (errMi <= config.search.distanceToleranceMi) return leg;
+    if (withinDistance((leg.distance * 2) / MI_TO_M, totalMi)) return leg;
     if (leg.distance < legM) lo = crowM;
     else hi = crowM;
   }
@@ -269,8 +345,9 @@ function toCandidate(
   pathType: RouteCandidate["pathType"],
   approachMi: number,
   approachCoordinates: [number, number][],
+  targetMi: number,
 ): RouteCandidate {
-  const { score, breakdown } = scoreRoute(enriched, approachMi, pathType);
+  const { score, breakdown } = scoreRoute(enriched, approachMi, pathType, targetMi);
   return {
     id: routeId(enriched.coordinates),
     pathType,
