@@ -24,18 +24,37 @@ the address to where a loop starts. "Next 5 routes" pages through the rest.
 It is a development tool for judging route quality by eye — the thing no
 metric replaces — not the app itself.
 
-## What `start.cmd` needs
+## Setting up on a new machine
 
-Already in place on this machine:
+The repo carries the code and config. Four things it deliberately does not,
+because they are large, licensed elsewhere, or rebuildable in seconds:
 
-- **Java 21** (Eclipse Temurin). Any JDK 17+ works.
-- **Node 24** for the API.
-- **GraphHopper 11** — `routing/graphhopper-web-11.0.jar`. Not in git (45 MB);
-  if missing, download the `graphhopper-web` jar from the
-  [releases page](https://github.com/graphhopper/graphhopper/releases) into
-  `routing/`.
-- **Map data** — `routing/data/region.osm.pbf`, currently a BBBike extract of
-  Leander/Cedar Park (30.51-30.61 N, 97.77-97.96 W). Not in git.
+| Missing piece | How to get it | Size |
+|---|---|---|
+| Java 17+ | `winget install EclipseAdoptium.Temurin.21.JDK` | ~200 MB |
+| Node 20+ | `winget install OpenJS.NodeJS.LTS` | ~60 MB |
+| GraphHopper jar | `graphhopper-web-11.0.jar` from the [releases page](https://github.com/graphhopper/graphhopper/releases), saved into `routing/` | 47 MB |
+| Map extract | a BBBike extract saved as `routing/data/region.osm.pbf` | ~5 MB |
+| `api/node_modules/` | `cd api && npm install` | — |
+| `routing/graph-cache/` | built automatically on first start | — |
+
+From nothing to routes on a map:
+
+```bash
+git clone https://github.com/jaronk100/ai_running_path
+```
+
+1. Install Java and Node with the commands above, then **open a new terminal** —
+   PATH changes do not reach terminals that were already open.
+2. Download the GraphHopper jar into `routing/`.
+3. Get a map extract from <https://extract.bbbike.org/> (draw a box, format
+   "Protocolbuffer (PBF)") and save it as `routing/data/region.osm.pbf`. The one
+   used so far covers Leander/Cedar Park, 30.51-30.61 N, 97.77-97.96 W.
+4. `cd api && npm install`
+5. Double-click `start.cmd`.
+
+The first start imports the extract and takes about 7 seconds for that area;
+later starts reuse `routing/graph-cache/` and are instant.
 
 ## Changing the map area
 
